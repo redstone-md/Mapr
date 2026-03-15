@@ -2,18 +2,21 @@ import { writeFile } from "fs/promises";
 import { resolve } from "path";
 import { z } from "zod";
 
+import { artifactTypeSchema } from "./artifacts";
 import type { BundleAnalysis } from "./ai-analyzer";
-import type { FormattedBundle } from "./formatter";
+import type { FormattedArtifact } from "./formatter";
 
 const reportInputSchema = z.object({
   targetUrl: z.string().url(),
-  scriptUrls: z.array(z.string().url()),
-  bundles: z.array(
+  htmlPages: z.array(z.string().url()),
+  artifacts: z.array(
     z.object({
       url: z.string().url(),
-      rawCode: z.string(),
-      formattedCode: z.string(),
+      type: artifactTypeSchema,
+      content: z.string(),
+      formattedContent: z.string(),
       sizeBytes: z.number().int().nonnegative(),
+      discoveredFrom: z.string().min(1),
       formattingSkipped: z.boolean(),
       formattingNote: z.string().optional(),
     }),
@@ -43,10 +46,12 @@ const reportInputSchema = z.object({
       }),
     ),
     notableLibraries: z.array(z.string()),
+    investigationTips: z.array(z.string()),
     risks: z.array(z.string()),
-    bundleSummaries: z.array(
+    artifactSummaries: z.array(
       z.object({
         url: z.string().url(),
+        type: artifactTypeSchema,
         chunkCount: z.number().int().nonnegative(),
         summary: z.string(),
       }),
@@ -55,29 +60,25 @@ const reportInputSchema = z.object({
   }),
 });
 
-function formatBulletList(items: string[]): string {
-  if (items.length === 0) {
-    return "- None detected";
-  }
-
-  return items.map((item) => `- ${item}`).join("\n");
+function formatBulletList(items: string[], emptyState: string): string {
+  return items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : `- ${emptyState}`;
 }
 
-function formatBundleTable(bundles: FormattedBundle[]): string {
-  if (bundles.length === 0) {
-    return "_No external bundles were downloaded._";
+function formatArtifactTable(artifacts: FormattedArtifact[]): string {
+  if (artifacts.length === 0) {
+    return "_No artifacts were downloaded._";
   }
 
   const lines = [
-    "| Bundle URL | Size (bytes) | Formatting | Note |",
-    "| --- | ---: | --- | --- |",
+    "| Artifact URL | Type | Size (bytes) | Discovered From | Formatting | Note |",
+    "| --- | --- | ---: | --- | --- | --- |",
   ];
 
-  for (const bundle of bundles) {
+  for (const artifact of artifacts) {
     lines.push(
-      `| ${bundle.url} | ${bundle.sizeBytes} | ${bundle.formattingSkipped ? "Skipped" : "Applied"} | ${
-        bundle.formattingNote ?? "None"
-      } |`,
+      `| ${artifact.url} | ${artifact.type} | ${artifact.sizeBytes} | ${artifact.discoveredFrom} | ${
+        artifact.formattingSkipped ? "Skipped" : "Applied"
+      } | ${artifact.formattingNote ?? "None"} |`,
     );
   }
 
@@ -87,99 +88,102 @@ function formatBundleTable(bundles: FormattedBundle[]): string {
 export class ReportWriter {
   public generateMarkdown(input: {
     targetUrl: string;
-    scriptUrls: string[];
-    bundles: FormattedBundle[];
+    htmlPages: string[];
+    artifacts: FormattedArtifact[];
     analysis: BundleAnalysis;
   }): string {
     const report = reportInputSchema.parse(input);
 
     const entryPointsSection =
-      report.analysis.entryPoints.length === 0
-        ? "- None identified"
-        : report.analysis.entryPoints
-            .map(
-              (entryPoint) =>
-                `- \`${entryPoint.symbol}\`: ${entryPoint.description} Evidence: ${entryPoint.evidence}`,
-            )
-            .join("\n");
+      report.analysis.entryPoints.length > 0
+        ? report.analysis.entryPoints
+            .map((entryPoint) => `- \`${entryPoint.symbol}\`: ${entryPoint.description} Evidence: ${entryPoint.evidence}`)
+            .join("\n")
+        : "- None identified";
 
     const callGraphSection =
-      report.analysis.callGraph.length === 0
-        ? "- No clear call edges extracted"
-        : report.analysis.callGraph
+      report.analysis.callGraph.length > 0
+        ? report.analysis.callGraph
             .map((edge) => `- \`${edge.caller}\` -> \`${edge.callee}\`: ${edge.rationale}`)
-            .join("\n");
+            .join("\n")
+        : "- No clear call edges extracted";
 
     const restoredNamesSection =
-      report.analysis.restoredNames.length === 0
-        ? "- No confident renames proposed"
-        : report.analysis.restoredNames
-            .map(
-              (name) =>
-                `- \`${name.originalName}\` -> \`${name.suggestedName}\`: ${name.justification}`,
-            )
-            .join("\n");
+      report.analysis.restoredNames.length > 0
+        ? report.analysis.restoredNames
+            .map((entry) => `- \`${entry.originalName}\` -> \`${entry.suggestedName}\`: ${entry.justification}`)
+            .join("\n")
+        : "- No confident renames proposed";
 
-    const bundleSummarySection =
-      report.analysis.bundleSummaries.length === 0
-        ? "- None"
-        : report.analysis.bundleSummaries
+    const artifactSummarySection =
+      report.analysis.artifactSummaries.length > 0
+        ? report.analysis.artifactSummaries
             .map(
               (summary) =>
-                `- ${summary.url} (${summary.chunkCount} chunk(s)): ${summary.summary}`,
+                `- ${summary.url} [${summary.type}] (${summary.chunkCount} chunk(s)): ${summary.summary}`,
             )
-            .join("\n");
+            .join("\n")
+        : "- None";
 
     return [
-      `# Mapr Reverse-Engineering Report`,
-      ``,
+      "# Mapr Reverse-Engineering Report",
+      "",
       `- Target URL: ${report.targetUrl}`,
       `- Generated: ${new Date().toISOString()}`,
-      `- External script bundles discovered: ${report.scriptUrls.length}`,
+      `- HTML pages crawled: ${report.htmlPages.length}`,
+      `- Artifacts analyzed: ${report.artifacts.length}`,
       `- AI chunks analyzed: ${report.analysis.analyzedChunkCount}`,
-      ``,
-      `## Executive Summary`,
-      ``,
+      "",
+      "## Website Surface",
+      "",
+      formatBulletList(report.htmlPages, "No HTML pages crawled beyond the entry page"),
+      "",
+      "## Executive Summary",
+      "",
       report.analysis.overview,
-      ``,
-      `## Entry Points`,
-      ``,
+      "",
+      "## Entry Points",
+      "",
       entryPointsSection,
-      ``,
-      `## Initialization Flow`,
-      ``,
-      formatBulletList(report.analysis.initializationFlow),
-      ``,
-      `## Call Graph`,
-      ``,
+      "",
+      "## Initialization Flow",
+      "",
+      formatBulletList(report.analysis.initializationFlow, "No initialization flow extracted"),
+      "",
+      "## Call Graph",
+      "",
       callGraphSection,
-      ``,
-      `## Restored Names`,
-      ``,
+      "",
+      "## Restored Names",
+      "",
       restoredNamesSection,
-      ``,
-      `## Notable Libraries`,
-      ``,
-      formatBulletList(report.analysis.notableLibraries),
-      ``,
-      `## Risks And Observations`,
-      ``,
-      formatBulletList(report.analysis.risks),
-      ``,
-      `## Bundle Summaries`,
-      ``,
-      bundleSummarySection,
-      ``,
-      `## Downloaded Bundles`,
-      ``,
-      formatBundleTable(report.bundles),
+      "",
+      "## Notable Libraries",
+      "",
+      formatBulletList(report.analysis.notableLibraries, "No notable libraries identified"),
+      "",
+      "## Investigation Tips",
+      "",
+      formatBulletList(report.analysis.investigationTips, "No investigation tips generated"),
+      "",
+      "## Risks And Observations",
+      "",
+      formatBulletList(report.analysis.risks, "No specific risks highlighted"),
+      "",
+      "## Artifact Summaries",
+      "",
+      artifactSummarySection,
+      "",
+      "## Downloaded Artifacts",
+      "",
+      formatArtifactTable(report.artifacts),
     ].join("\n");
   }
 
   public async writeReport(input: {
     targetUrl: string;
-    scriptUrls: string[];
-    bundles: FormattedBundle[];
+    htmlPages: string[];
+    artifacts: FormattedArtifact[];
     analysis: BundleAnalysis;
   }): Promise<string> {
     const validatedInput = reportInputSchema.parse(input);

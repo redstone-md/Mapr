@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { cancel, intro, isCancel, outro, spinner, text } from "@clack/prompts";
+import { cancel, confirm, intro, isCancel, outro, spinner, text } from "@clack/prompts";
 import pc from "picocolors";
 import { z } from "zod";
 
@@ -16,7 +16,7 @@ const targetUrlSchema = z
   .url("Enter a valid URL.")
   .refine((value) => /^https?:\/\//.test(value), "URL must start with http:// or https://.");
 
-function exitIfCancelled<T>(value: T) {
+function exitIfCancelled<T>(value: T): T {
   if (isCancel(value)) {
     cancel("Operation cancelled.");
     process.exit(0);
@@ -26,81 +26,92 @@ function exitIfCancelled<T>(value: T) {
 }
 
 function formatError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return "An unknown error occurred.";
+  return error instanceof Error ? error.message : "An unknown error occurred.";
 }
 
 async function run(): Promise<void> {
-  intro(`${pc.bgCyan(pc.black(" mapr "))} ${pc.bold("Frontend bundle reverse-engineering for Bun")}`);
+  intro(`${pc.bgCyan(pc.black(" mapr "))} ${pc.bold("Website reverse-engineering for Bun")}`);
 
   const configManager = new ConfigManager();
-  const config = await configManager.ensureConfig();
+  const existingConfig = await configManager.readConfig();
+  let forceReconfigure = false;
 
-  const targetUrlInput = exitIfCancelled(
-    await text({
-      message: "Target URL to analyze",
-      placeholder: "https://example.com",
-      validate(value) {
-        const parsed = targetUrlSchema.safeParse(value);
-        if (!parsed.success) {
-          return parsed.error.issues[0]?.message ?? "Enter a valid URL.";
-        }
+  if (existingConfig) {
+    forceReconfigure = Boolean(
+      exitIfCancelled(
+      await confirm({
+        message: `Reconfigure AI provider? Current: ${existingConfig.providerName} / ${existingConfig.model}`,
+        active: "Reconfigure",
+        inactive: "Keep saved config",
+        initialValue: false,
+      }),
+      ),
+    );
+  }
 
-        return undefined;
-      },
-    }),
+  const config = await configManager.ensureConfig({ forceReconfigure });
+
+  const targetUrl = targetUrlSchema.parse(
+    exitIfCancelled(
+      await text({
+        message: "Target URL to analyze",
+        placeholder: "http://localhost:5173 or https://example.com",
+        validate(value) {
+          const parsed = targetUrlSchema.safeParse(value);
+          return parsed.success ? undefined : parsed.error.issues[0]?.message ?? "Enter a valid URL.";
+        },
+      }),
+    ),
   );
 
-  const targetUrl = targetUrlSchema.parse(targetUrlInput);
-
   const scrapeStep = spinner();
-  scrapeStep.start("Fetching HTML and discovering external bundles");
+  scrapeStep.start("Crawling HTML, scripts, service workers, WASM, and related website artifacts");
   const scraper = new BundleScraper();
   const scrapeResult = await scraper.scrape(targetUrl);
-  scrapeStep.stop(`Discovered ${scrapeResult.scriptUrls.length} external script bundle(s)`);
+  scrapeStep.stop(
+    `Discovered ${scrapeResult.artifacts.length} artifact(s) across ${scrapeResult.htmlPages.length} page(s)`,
+  );
 
   const formatStep = spinner();
-  formatStep.start("Beautifying downloaded bundles");
+  formatStep.start("Formatting downloaded artifacts for analysis");
   const formatter = new BundleFormatter();
-  const formattedBundles = await formatter.formatBundles(scrapeResult.bundles);
-  const skippedCount = formattedBundles.filter((bundle) => bundle.formattingSkipped).length;
+  const formattedArtifacts = await formatter.formatArtifacts(scrapeResult.artifacts);
+  const skippedCount = formattedArtifacts.filter((artifact) => artifact.formattingSkipped).length;
   formatStep.stop(
     skippedCount > 0
-      ? `Prepared ${formattedBundles.length} bundle(s); skipped formatting for ${skippedCount} oversized or invalid file(s)`
-      : `Prepared ${formattedBundles.length} bundle(s) for analysis`,
+      ? `Prepared ${formattedArtifacts.length} artifact(s); skipped formatting for ${skippedCount} oversized or unsupported item(s)`
+      : `Prepared ${formattedArtifacts.length} artifact(s) for analysis`,
   );
 
   const analysisStep = spinner();
-  analysisStep.start("Analyzing code chunks with OpenAI");
+  analysisStep.start("Analyzing website artifacts with the configured AI provider");
   const analyzer = new AiBundleAnalyzer({
-    apiKey: config.openAiApiKey,
-    model: config.model,
+    providerConfig: config,
   });
   const analysis = await analyzer.analyze({
     pageUrl: scrapeResult.pageUrl,
-    bundles: formattedBundles,
+    artifacts: formattedArtifacts,
   });
-  analysisStep.stop(`Analyzed ${analysis.analyzedChunkCount} chunk(s) across ${formattedBundles.length} bundle(s)`);
+  analysisStep.stop(`Analyzed ${analysis.analyzedChunkCount} chunk(s) across ${formattedArtifacts.length} artifact(s)`);
 
   const reportStep = spinner();
   reportStep.start("Generating Markdown report");
   const reportWriter = new ReportWriter();
   const reportPath = await reportWriter.writeReport({
     targetUrl: scrapeResult.pageUrl,
-    scriptUrls: scrapeResult.scriptUrls,
-    bundles: formattedBundles,
+    htmlPages: scrapeResult.htmlPages,
+    artifacts: formattedArtifacts,
     analysis,
   });
   reportStep.stop("Report written to disk");
 
   outro(
     [
-      `${pc.green("Analysis complete.")}`,
+      pc.green("Analysis complete."),
       `${pc.bold("Target:")} ${scrapeResult.pageUrl}`,
-      `${pc.bold("Bundles:")} ${formattedBundles.length}`,
+      `${pc.bold("Provider:")} ${config.providerName} (${config.model})`,
+      `${pc.bold("Pages:")} ${scrapeResult.htmlPages.length}`,
+      `${pc.bold("Artifacts:")} ${formattedArtifacts.length}`,
       `${pc.bold("Chunks analyzed:")} ${analysis.analyzedChunkCount}`,
       `${pc.bold("Report:")} ${pc.underline(reportPath)}`,
     ].join("\n"),
