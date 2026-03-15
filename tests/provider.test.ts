@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { join } from "path";
+import { tmpdir } from "os";
 
 import {
   AiProviderClient,
@@ -9,6 +12,17 @@ import {
   resolveCodexModelForMode,
   supportsOpenAiMode,
 } from "../lib/provider";
+
+const createdDirectories: string[] = [];
+
+afterEach(async () => {
+  while (createdDirectories.length > 0) {
+    const directory = createdDirectories.pop();
+    if (directory) {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
 
 describe("AiProviderClient", () => {
   test("fetches model ids from an OpenAI-compatible models endpoint", async () => {
@@ -91,6 +105,84 @@ describe("AiProviderClient", () => {
     });
 
     expect(calls).toEqual(["https://api.onlysq.ru/ai/models"]);
+  });
+
+  test("uses Codex CLI auth against the ChatGPT Codex models endpoint", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "mapr-provider-codex-"));
+    createdDirectories.push(codexHome);
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      join(codexHome, "auth.json"),
+      JSON.stringify(
+        {
+          auth_mode: "chatgpt",
+          OPENAI_API_KEY: null,
+          tokens: {
+            id_token:
+              "eyJhbGciOiJIUzI1NiJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoib3JnX3Rlc3QiLCJjaGF0Z3B0X3BsYW5fdHlwZSI6InRlYW0ifX0.sig",
+            access_token:
+              "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJvcmdfdGVzdCJ9fQ.sig",
+            refresh_token: "refresh-current",
+            account_id: "org_test",
+          },
+          last_refresh: "2026-03-15T00:00:00.000Z",
+        },
+        null,
+        2,
+      ),
+    );
+
+    const client = new AiProviderClient({
+      providerType: "openai",
+      authMethod: "codex-cli",
+      providerName: "OpenAI",
+      codexHomePath: codexHome,
+      baseURL: "https://chatgpt.com/backend-api/codex",
+      model: "gpt-5.4",
+      modelContextSize: 272000,
+    });
+
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    const catalog = await client.fetchModelCatalog(async (input: string | URL | Request, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(String(input), init);
+      calls.push({
+        url: request.url,
+        headers: new Headers(request.headers),
+      });
+
+      if (request.url.startsWith("https://auth.openai.com/oauth/token")) {
+        return new Response(
+          JSON.stringify({
+            id_token:
+              "eyJhbGciOiJIUzI1NiJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoib3JnX3Rlc3QiLCJjaGF0Z3B0X3BsYW5fdHlwZSI6InRlYW0ifSwiZXhwIjo0MTAyNDQ0ODAwfQ.sig",
+            access_token:
+              "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJvcmdfdGVzdCJ9fQ.sig",
+            refresh_token: "refresh-new",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          models: [
+            { slug: "gpt-5.4", display_name: "gpt-5.4", context_window: 272000 },
+            { slug: "gpt-5.1-codex-mini", display_name: "gpt-5.1-codex-mini", context_window: 272000 },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    expect(calls[0]?.url).toContain("https://chatgpt.com/backend-api/codex/models?client_version=");
+    expect(calls[0]?.headers.get("authorization")).toMatch(/^Bearer /);
+    expect(calls[0]?.headers.get("chatgpt-account-id")).toBe("org_test");
+    expect(catalog).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "gpt-5.1-codex-mini", contextSize: 272000 }),
+        expect.objectContaining({ id: "gpt-5.4", contextSize: 272000 }),
+      ]),
+    );
   });
 });
 

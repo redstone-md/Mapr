@@ -9,19 +9,21 @@ describe("parseCliArgs", () => {
       "--url",
       "http://localhost:5178",
       "--provider-type",
-      "openai-compatible",
+      "openai",
       "--openai-mode",
       "fast",
+      "--auth-method",
+      "codex-cli",
+      "--codex-home",
+      "C:\\Users\\Andrii\\.codex",
       "--provider-name",
-      "Local vLLM",
-      "--api-key",
-      "secret",
+      "OpenAI",
       "--base-url",
-      "http://localhost:8000/v1",
+      "https://chatgpt.com/backend-api/codex",
       "--model",
-      "qwen2.5-coder",
+      "gpt-5.4",
       "--context-size",
-      "512000",
+      "272000",
       "--analysis-concurrency",
       "3",
       "--local-rag",
@@ -36,7 +38,9 @@ describe("parseCliArgs", () => {
     expect(args.headless).toBe(true);
     expect(args.url).toBe("http://localhost:5178");
     expect(args.openAiMode).toBe("fast");
-    expect(args.contextSize).toBe(512000);
+    expect(args.authMethod).toBe("codex-cli");
+    expect(args.codexHomePath).toBe("C:\\Users\\Andrii\\.codex");
+    expect(args.contextSize).toBe(272000);
     expect(args.analysisConcurrency).toBe(3);
     expect(args.localRag).toBe(true);
     expect(args.maxPages).toBe(6);
@@ -48,21 +52,27 @@ describe("parseCliArgs", () => {
     const overrides = getConfigOverrides(
       parseCliArgs([
         "--provider-type",
-        "openai-compatible",
+        "openai",
         "--openai-mode",
         "reasoning",
+        "--auth-method",
+        "codex-cli",
+        "--codex-home",
+        "C:\\Users\\Andrii\\.codex",
         "--model",
-        "qwen2.5-coder",
+        "gpt-5.4",
         "--context-size",
-        "512000",
+        "272000",
       ]),
     );
 
     expect(overrides).toEqual({
-      providerType: "openai-compatible",
+      providerType: "openai",
       openAiMode: "reasoning",
-      model: "qwen2.5-coder",
-      modelContextSize: 512000,
+      authMethod: "codex-cli",
+      codexHomePath: "C:\\Users\\Andrii\\.codex",
+      model: "gpt-5.4",
+      modelContextSize: 272000,
     });
   });
 

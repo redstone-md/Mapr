@@ -4,11 +4,14 @@ import { homedir } from "os";
 import { join } from "path";
 import { z } from "zod";
 
+import { DEFAULT_CHATGPT_CODEX_BASE_URL, DEFAULT_CODEX_HOME_PATH } from "./codex-auth";
+import { promptForAuthMethod, promptForCodexHomePath, promptForCodexMode, promptForContextSize } from "./config-prompts";
 import {
   AiProviderClient,
   DEFAULT_MODEL,
   DEFAULT_MODEL_CONTEXT_SIZE,
   DEFAULT_OPENAI_BASE_URL,
+  authMethodSchema,
   aiProviderConfigSchema,
   findKnownModelInfo,
   getOpenAiCompatibleProviderPresets,
@@ -28,23 +31,40 @@ const persistedConfigSchema = z
     providerType: z.enum(["openai", "openai-compatible"]).optional(),
     providerPreset: z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]).optional(),
     openAiMode: openAiModeSchema.optional(),
+    authMethod: authMethodSchema.optional(),
     providerName: z.string().min(1).optional(),
     apiKey: z.string().min(1).optional(),
     openAiApiKey: z.string().min(1).optional(),
+    codexHomePath: z.string().min(1).optional(),
     baseURL: z.string().url().optional(),
     model: z.string().min(1).optional(),
     modelContextSize: z.number().int().positive().optional(),
   })
   .strict();
 
-const configDraftSchema = aiProviderConfigSchema.partial();
+const configDraftSchema = z
+  .object({
+    providerType: z.enum(["openai", "openai-compatible"]).optional(),
+    providerPreset: z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]).optional(),
+    openAiMode: openAiModeSchema.optional(),
+    authMethod: authMethodSchema.optional(),
+    providerName: z.string().min(1).optional(),
+    apiKey: z.string().min(1).optional(),
+    codexHomePath: z.string().min(1).optional(),
+    baseURL: z.string().trim().url().optional(),
+    model: z.string().min(1).optional(),
+    modelContextSize: z.number().int().positive().optional(),
+  })
+  .strict();
 const modelListingConfigSchema = z.object({
   providerType: z.enum(["openai", "openai-compatible"]).default("openai"),
   providerPreset: z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]).optional(),
   openAiMode: openAiModeSchema.optional(),
+  authMethod: authMethodSchema.optional(),
   providerName: z.string().min(1).default("OpenAI"),
-  apiKey: z.string().min(1),
-  baseURL: z.string().trim().url().default(DEFAULT_OPENAI_BASE_URL),
+  apiKey: z.string().min(1).optional(),
+  codexHomePath: z.string().min(1).optional(),
+  baseURL: z.string().trim().url().optional(),
 });
 
 type PersistedConfig = z.infer<typeof persistedConfigSchema>;
@@ -77,12 +97,36 @@ function mergeConfigDrafts(baseConfig: ConfigDraft | null, overrides: ConfigDraf
     return null;
   }
 
-  const merged: ConfigDraft = {
+  const merged = configDraftSchema.parse({
     ...(baseConfig ?? {}),
     ...(overrides ?? {}),
-  };
+  });
+  const providerType = merged.providerType ?? "openai";
+  const authMethod = merged.authMethod ?? (providerType === "openai" ? "api-key" : undefined);
+  const providerTypeChanged =
+    overrides?.providerType !== undefined && baseConfig?.providerType !== undefined && overrides.providerType !== baseConfig.providerType;
+  const shouldResetBaseURL =
+    overrides?.baseURL === undefined &&
+    (providerTypeChanged ||
+      (providerType === "openai" && overrides?.authMethod === "codex-cli") ||
+      (providerType === "openai-compatible" && overrides?.providerPreset !== undefined));
+  const normalizedBaseURL =
+    shouldResetBaseURL || merged.baseURL === undefined
+      ? providerType === "openai" && authMethod === "codex-cli"
+        ? DEFAULT_CHATGPT_CODEX_BASE_URL
+        : DEFAULT_OPENAI_BASE_URL
+      : merged.baseURL;
+  const normalizedProviderName =
+    providerType === "openai" && overrides?.providerName === undefined && (providerTypeChanged || overrides?.authMethod !== undefined)
+      ? "OpenAI"
+      : merged.providerName;
 
-  return configDraftSchema.parse(merged);
+  return configDraftSchema.parse({
+    ...merged,
+    ...(authMethod !== undefined ? { authMethod } : {}),
+    ...(normalizedProviderName !== undefined ? { providerName: normalizedProviderName } : {}),
+    baseURL: normalizedBaseURL,
+  });
 }
 
 function normalizePersistedConfig(config: PersistedConfig | null): ConfigDraft | null {
@@ -91,7 +135,17 @@ function normalizePersistedConfig(config: PersistedConfig | null): ConfigDraft |
   }
 
   const providerType = config.providerType ?? "openai";
-  const baseURL = config.baseURL ?? DEFAULT_OPENAI_BASE_URL;
+  const authMethod =
+    config.authMethod ??
+    (providerType === "openai" &&
+    (config.codexHomePath !== undefined || config.baseURL === DEFAULT_CHATGPT_CODEX_BASE_URL) &&
+    !config.apiKey &&
+    !config.openAiApiKey
+      ? "codex-cli"
+      : "api-key");
+  const baseURL =
+    config.baseURL ??
+    (providerType === "openai" && authMethod === "codex-cli" ? DEFAULT_CHATGPT_CODEX_BASE_URL : DEFAULT_OPENAI_BASE_URL);
 
   return configDraftSchema.parse({
     providerType,
@@ -101,8 +155,10 @@ function normalizePersistedConfig(config: PersistedConfig | null): ConfigDraft |
         ? inferProviderPreset(baseURL, providerType)
         : undefined),
     openAiMode: config.openAiMode,
+    authMethod,
     providerName: config.providerName ?? "OpenAI",
     apiKey: config.apiKey ?? config.openAiApiKey,
+    codexHomePath: config.codexHomePath,
     baseURL,
     model: config.model ?? DEFAULT_MODEL,
     modelContextSize: config.modelContextSize ?? DEFAULT_MODEL_CONTEXT_SIZE,
@@ -179,7 +235,16 @@ async function promptForModel(
         return resolvedModel;
       }
     }
-  } catch {
+  } catch (error) {
+    if (
+      config.providerType === "openai" &&
+      config.authMethod === "codex-cli" &&
+      error instanceof Error &&
+      /codex login|codex cli auth/i.test(error.message)
+    ) {
+      throw error;
+    }
+
     return {
       id: z
         .string()
@@ -220,35 +285,6 @@ async function promptForModel(
         ),
       ),
   };
-}
-
-async function promptForContextSize(defaultValue: number): Promise<number> {
-  const rawValue = exitIfCancelled(
-    await text({
-      message: "Model context size in tokens",
-      placeholder: String(DEFAULT_MODEL_CONTEXT_SIZE),
-      initialValue: String(defaultValue),
-      validate(value) {
-        const parsed = z.coerce.number().int().positive().safeParse(value);
-        return parsed.success ? undefined : "Context size must be a positive integer.";
-      },
-    }),
-  );
-
-  return z.coerce.number().int().positive().parse(rawValue);
-}
-
-async function promptForCodexMode(initialMode: "fast" | "reasoning" | undefined): Promise<"fast" | "reasoning"> {
-  return exitIfCancelled(
-    await select({
-      message: "Codex mode",
-      initialValue: initialMode ?? "reasoning",
-      options: [
-        { value: "fast", label: "Fast", hint: "Prefer mini / lower-latency Codex variant" },
-        { value: "reasoning", label: "Reasoning", hint: "Prefer max / deeper reasoning Codex variant" },
-      ],
-    }),
-  ) as "fast" | "reasoning";
 }
 
 export type AppConfig = AiProviderConfig;
@@ -346,6 +382,11 @@ export class ConfigManager {
     const resolvedConfig = modelListingConfigSchema.parse(config);
     const providerClient = new AiProviderClient({
       ...resolvedConfig,
+      baseURL:
+        resolvedConfig.baseURL ??
+        (resolvedConfig.providerType === "openai" && resolvedConfig.authMethod === "codex-cli"
+          ? DEFAULT_CHATGPT_CODEX_BASE_URL
+          : DEFAULT_OPENAI_BASE_URL),
       model: DEFAULT_MODEL,
       modelContextSize: DEFAULT_MODEL_CONTEXT_SIZE,
     });
@@ -414,43 +455,60 @@ export class ConfigManager {
             ),
           );
 
+    const authMethod =
+      providerType === "openai"
+        ? await promptForAuthMethod(existingConfig?.authMethod as "api-key" | "codex-cli" | undefined, exitIfCancelled)
+        : undefined;
+
     const baseURL = z.string().trim().url().parse(
-      exitIfCancelled(
-        await text({
-          message: providerType === "openai" ? "OpenAI base URL" : "OpenAI-compatible base URL",
-          placeholder: DEFAULT_OPENAI_BASE_URL,
-          initialValue:
-            existingConfig?.baseURL && existingConfig.providerType === providerType && existingPreset === providerPreset
-              ? existingConfig.baseURL
-              : presetDefinition?.baseURL ?? DEFAULT_OPENAI_BASE_URL,
-          validate(value) {
-            const parsed = z.string().trim().url().safeParse(value);
-            return parsed.success ? undefined : "Base URL must be a valid URL.";
-          },
-        }),
-      ),
+      authMethod === "codex-cli"
+        ? DEFAULT_CHATGPT_CODEX_BASE_URL
+        : exitIfCancelled(
+            await text({
+              message: providerType === "openai" ? "OpenAI base URL" : "OpenAI-compatible base URL",
+              placeholder: DEFAULT_OPENAI_BASE_URL,
+              initialValue:
+                existingConfig?.baseURL && existingConfig.providerType === providerType && existingPreset === providerPreset
+                  ? existingConfig.baseURL
+                  : presetDefinition?.baseURL ?? DEFAULT_OPENAI_BASE_URL,
+              validate(value) {
+                const parsed = z.string().trim().url().safeParse(value);
+                return parsed.success ? undefined : "Base URL must be a valid URL.";
+              },
+            }),
+          ),
     );
 
-    const apiKey = z.string().trim().min(1).parse(
-      exitIfCancelled(
-        await password({
-          message: providerType === "openai" ? "Enter your OpenAI API key" : "Enter your provider API key",
-          mask: "*",
-          validate(value) {
-            const parsed = z.string().trim().min(1).safeParse(value);
-            return parsed.success ? undefined : "API key is required.";
-          },
-        }),
-      ),
-    );
+    const codexHomePath =
+      providerType === "openai" && authMethod === "codex-cli"
+        ? await promptForCodexHomePath(existingConfig?.codexHomePath ?? DEFAULT_CODEX_HOME_PATH, exitIfCancelled)
+        : undefined;
+
+    const apiKey =
+      authMethod === "codex-cli"
+        ? undefined
+        : z.string().trim().min(1).parse(
+            exitIfCancelled(
+              await password({
+                message: providerType === "openai" ? "Enter your OpenAI API key" : "Enter your provider API key",
+                mask: "*",
+                validate(value) {
+                  const parsed = z.string().trim().min(1).safeParse(value);
+                  return parsed.success ? undefined : "API key is required.";
+                },
+              }),
+            ),
+          );
 
     const model = await promptForModel(
       {
         providerType,
         ...(providerPreset !== undefined ? { providerPreset } : {}),
+        ...(authMethod !== undefined ? { authMethod } : {}),
         providerName,
+        ...(apiKey !== undefined ? { apiKey } : {}),
+        ...(codexHomePath !== undefined ? { codexHomePath } : {}),
         baseURL,
-        apiKey,
       },
       this.fetcher,
       existingConfig?.providerType === providerType ? existingConfig.model : undefined,
@@ -461,6 +519,7 @@ export class ConfigManager {
         ? await (async () => {
             const selectedMode = await promptForCodexMode(
               inferCodexMode(existingConfig?.model ?? model.id) ?? inferCodexMode(model.id) ?? "reasoning",
+              exitIfCancelled,
             );
             return selectedMode;
           })()
@@ -474,15 +533,18 @@ export class ConfigManager {
         : model;
 
     const modelContextSize =
-      finalModel.contextSize ?? (await promptForContextSize(existingConfig?.modelContextSize ?? DEFAULT_MODEL_CONTEXT_SIZE));
+      finalModel.contextSize ??
+      (await promptForContextSize(existingConfig?.modelContextSize ?? DEFAULT_MODEL_CONTEXT_SIZE, exitIfCancelled));
 
     return aiProviderConfigSchema.parse({
       providerType,
       ...(providerPreset !== undefined ? { providerPreset } : {}),
       ...(openAiMode !== undefined ? { openAiMode } : {}),
+      ...(authMethod !== undefined ? { authMethod } : {}),
       providerName,
       baseURL,
-      apiKey,
+      ...(apiKey !== undefined ? { apiKey } : {}),
+      ...(codexHomePath !== undefined ? { codexHomePath } : {}),
       model: finalModel.id,
       modelContextSize,
     });
