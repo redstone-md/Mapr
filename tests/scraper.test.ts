@@ -5,32 +5,36 @@ import { BundleScraper, extractArtifactCandidates } from "../lib/scraper";
 const emptyWasm = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
 
 describe("extractArtifactCandidates", () => {
-  test("extracts scripts, stylesheets, manifests, service workers, wasm, and same-origin pages", () => {
+  test("extracts code artifacts and ignores image assets", () => {
     const html = `
       <html>
         <head>
           <link rel="stylesheet" href="/assets/app.css" />
-          <link rel="manifest" href="/manifest.webmanifest" />
+          <link rel="modulepreload" href="/assets/preloaded.js" />
           <script src="/assets/app.js"></script>
           <script>
             navigator.serviceWorker.register('/sw.js');
             WebAssembly.instantiateStreaming(fetch('/assets/engine.wasm'));
+            fetch('/assets/logo.png');
           </script>
         </head>
         <body>
           <a href="/dashboard">Dashboard</a>
-          <a href="https://external.example.com/">External</a>
+          <iframe src="/frame"></iframe>
+          <form action="/submit"></form>
         </body>
       </html>
     `;
 
     const candidates = extractArtifactCandidates(html, "https://example.com");
+
     expect(candidates.map((candidate) => `${candidate.type}:${candidate.url}`).sort()).toEqual(
       [
-        "stylesheet:https://example.com/assets/app.css",
-        "manifest:https://example.com/manifest.webmanifest",
         "script:https://example.com/assets/app.js",
+        "script:https://example.com/assets/preloaded.js",
         "html:https://example.com/dashboard",
+        "html:https://example.com/frame",
+        "html:https://example.com/submit",
         "service-worker:https://example.com/sw.js",
         "wasm:https://example.com/assets/engine.wasm",
       ].sort(),
@@ -39,23 +43,34 @@ describe("extractArtifactCandidates", () => {
 });
 
 describe("BundleScraper", () => {
-  test("crawls multiple pages and downloads discovered website artifacts", async () => {
+  test("crawls same-origin pages, expands with sitemap, fetches source maps, and skips image artifacts", async () => {
     const fetchLog: string[] = [];
     const fetcher = async (input: string | URL | Request): Promise<Response> => {
       const url = String(input);
       fetchLog.push(url);
+
+      if (url === "https://example.com/robots.txt") {
+        return new Response("Sitemap: https://example.com/sitemap.xml", { status: 200 });
+      }
+
+      if (url === "https://example.com/sitemap.xml") {
+        return new Response(
+          `<?xml version="1.0" encoding="UTF-8"?><urlset><url><loc>https://example.com/offers</loc></url></urlset>`,
+          { status: 200, headers: { "content-type": "application/xml" } },
+        );
+      }
 
       if (url === "https://example.com/") {
         return new Response(
           `
             <html>
               <head>
-                <link rel="stylesheet" href="/assets/app.css" />
                 <script src="/assets/app.js"></script>
                 <script>navigator.serviceWorker.register('/sw.js')</script>
               </head>
               <body>
                 <a href="/dashboard">Dashboard</a>
+                <img src="/assets/logo.png" />
               </body>
             </html>
           `,
@@ -70,14 +85,30 @@ describe("BundleScraper", () => {
         });
       }
 
+      if (url === "https://example.com/offers") {
+        return new Response(
+          `<html><head><script src="/assets/offers.js"></script></head><body>offers</body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } },
+        );
+      }
+
       if (url === "https://example.com/assets/app.js") {
         return new Response(
           `
             import '/assets/chunk.js';
             WebAssembly.instantiateStreaming(fetch('/assets/engine.wasm'));
+            //# sourceMappingURL=/assets/app.js.map
+            fetch('/assets/logo.png');
           `,
           { status: 200, headers: { "content-type": "application/javascript" } },
         );
+      }
+
+      if (url === "https://example.com/assets/offers.js") {
+        return new Response("console.log('offers');", {
+          status: 200,
+          headers: { "content-type": "application/javascript" },
+        });
       }
 
       if (url === "https://example.com/assets/chunk.js") {
@@ -87,18 +118,15 @@ describe("BundleScraper", () => {
         });
       }
 
-      if (url === "https://example.com/assets/app.css") {
-        return new Response("body{background:url('/assets/bg.css')}", {
-          status: 200,
-          headers: { "content-type": "text/css" },
-        });
-      }
-
-      if (url === "https://example.com/assets/bg.css") {
-        return new Response(".app{color:red}", {
-          status: 200,
-          headers: { "content-type": "text/css" },
-        });
+      if (url === "https://example.com/assets/app.js.map") {
+        return new Response(
+          JSON.stringify({
+            version: 3,
+            sources: ["src/app.ts"],
+            sourcesContent: ["export function boot(){ console.log('boot'); }"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
       }
 
       if (url === "https://example.com/sw.js") {
@@ -115,23 +143,37 @@ describe("BundleScraper", () => {
         });
       }
 
+      if (url === "https://example.com/assets/logo.png") {
+        return new Response("png", { status: 200, headers: { "content-type": "image/png" } });
+      }
+
       return new Response("missing", { status: 404, statusText: "Not Found" });
     };
 
     const scraper = new BundleScraper(fetcher, {
-      maxPages: 5,
+      maxPages: 10,
       maxArtifacts: 20,
     });
     const result = await scraper.scrape("https://example.com/");
 
-    expect(fetchLog).toContain("https://example.com/");
-    expect(result.htmlPages).toEqual(["https://example.com/", "https://example.com/dashboard"]);
-    expect(result.artifacts.map((artifact) => artifact.type)).toContain("service-worker");
-    expect(result.artifacts.map((artifact) => artifact.type)).toContain("wasm");
-    expect(result.scriptUrls).toEqual([
-      "https://example.com/assets/app.js",
-      "https://example.com/sw.js",
-      "https://example.com/assets/chunk.js",
-    ]);
+    expect(fetchLog).toContain("https://example.com/robots.txt");
+    expect(fetchLog).toContain("https://example.com/sitemap.xml");
+    expect(fetchLog).toContain("https://example.com/offers");
+    expect(fetchLog).not.toContain("https://example.com/assets/logo.png");
+    expect(result.htmlPages.sort()).toEqual(
+      ["https://example.com/offers", "https://example.com/", "https://example.com/dashboard"].sort(),
+    );
+    expect(result.artifacts.map((artifact) => artifact.type).sort()).toEqual(
+      (["script", "script", "script", "service-worker", "source-map", "wasm"] as const).slice().sort(),
+    );
+    expect(result.scriptUrls.sort()).toEqual(
+      [
+        "https://example.com/assets/offers.js",
+        "https://example.com/assets/app.js",
+        "https://example.com/sw.js",
+        "https://example.com/assets/chunk.js",
+      ].sort(),
+    );
+    expect(result.artifacts.find((artifact) => artifact.type === "source-map")?.content).toContain("src/app.ts");
   });
 });

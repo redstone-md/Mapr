@@ -6,6 +6,7 @@ import {
   discoveredArtifactSchema,
   extractArtifactCandidates,
   extractNestedCandidates,
+  isAnalyzableArtifactType,
   type ArtifactCandidate,
   type DiscoveredArtifact,
 } from "./artifacts";
@@ -18,8 +19,8 @@ const httpUrlSchema = z
   .refine((value) => /^https?:\/\//.test(value), "Expected an http or https URL.");
 
 const scraperOptionsSchema = z.object({
-  maxPages: z.number().int().positive().default(10),
-  maxArtifacts: z.number().int().positive().default(200),
+  maxPages: z.number().int().positive().default(20),
+  maxArtifacts: z.number().int().positive().default(400),
 });
 
 export interface ScrapeResult {
@@ -42,6 +43,79 @@ function shouldFollowCandidate(candidate: ArtifactCandidate, rootOrigin: string)
   }
 
   return true;
+}
+
+function parseSitemapXml(xml: string, rootOrigin: string): ArtifactCandidate[] {
+  const candidates = new Map<string, ArtifactCandidate>();
+  const regex = /<loc>([^<]+)<\/loc>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(xml)) !== null) {
+    try {
+      const url = new URL(match[1] ?? "").toString();
+      if (new URL(url).origin !== rootOrigin) {
+        continue;
+      }
+
+      const candidate = artifactCandidateSchema.safeParse({
+        url,
+        type: "html",
+        discoveredFrom: "sitemap:loc",
+      });
+
+      if (candidate.success) {
+        candidates.set(candidate.data.url, candidate.data);
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return [...candidates.values()];
+}
+
+function parseRobotsSitemaps(robotsText: string): string[] {
+  return robotsText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^sitemap:/i.test(line))
+    .map((line) => line.replace(/^sitemap:\s*/i, "").trim())
+    .filter(Boolean);
+}
+
+function summarizeSourceMap(rawMap: string, mapUrl: string): string {
+  try {
+    const payload = z
+      .object({
+        version: z.number().optional(),
+        file: z.string().optional(),
+        sourceRoot: z.string().optional(),
+        sources: z.array(z.string()).optional(),
+        sourcesContent: z.array(z.string().nullable()).optional(),
+      })
+      .parse(JSON.parse(rawMap) as unknown);
+
+    const sources = payload.sources ?? [];
+    const sourcesContent = payload.sourcesContent ?? [];
+    const lines = [`Source map: ${mapUrl}`, `Mapped sources: ${sources.length}`];
+
+    for (let index = 0; index < sources.length; index += 1) {
+      const sourceName = sources[index];
+      const sourceContent = sourcesContent[index];
+      if (!sourceName) {
+        continue;
+      }
+
+      lines.push(`--- Source: ${sourceName}`);
+      if (typeof sourceContent === "string" && sourceContent.length > 0) {
+        lines.push(sourceContent);
+      }
+    }
+
+    return lines.join("\n");
+  } catch {
+    return rawMap;
+  }
 }
 
 export class BundleScraper {
@@ -69,6 +143,8 @@ export class BundleScraper {
       }),
     ];
 
+    queue.push(...(await this.discoverSupplementalPages(rootOrigin)));
+
     while (queue.length > 0) {
       if (artifacts.length >= this.options.maxArtifacts) {
         break;
@@ -89,10 +165,13 @@ export class BundleScraper {
 
       visitedUrls.add(candidate.url);
       const artifact = await this.fetchArtifact(candidate);
-      artifacts.push(artifact);
 
       if (artifact.type === "html") {
         htmlPages.add(artifact.url);
+      }
+
+      if (isAnalyzableArtifactType(artifact.type)) {
+        artifacts.push(artifact);
       }
 
       const nestedCandidates = extractNestedCandidates(artifact);
@@ -113,6 +192,41 @@ export class BundleScraper {
     };
   }
 
+  private async discoverSupplementalPages(rootOrigin: string): Promise<ArtifactCandidate[]> {
+    const candidates = new Map<string, ArtifactCandidate>();
+    const directSitemapUrl = new URL("/sitemap.xml", rootOrigin).toString();
+    const robotsUrl = new URL("/robots.txt", rootOrigin).toString();
+
+    const robotsText = await this.fetchOptionalText(robotsUrl);
+    const sitemapUrls = new Set<string>([directSitemapUrl]);
+
+    if (robotsText) {
+      for (const sitemapUrl of parseRobotsSitemaps(robotsText)) {
+        try {
+          const normalizedUrl = new URL(sitemapUrl, rootOrigin).toString();
+          if (new URL(normalizedUrl).origin === rootOrigin) {
+            sitemapUrls.add(normalizedUrl);
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    for (const sitemapUrl of sitemapUrls) {
+      const sitemapXml = await this.fetchOptionalText(sitemapUrl);
+      if (!sitemapXml) {
+        continue;
+      }
+
+      for (const candidate of parseSitemapXml(sitemapXml, rootOrigin)) {
+        candidates.set(candidate.url, candidate);
+      }
+    }
+
+    return [...candidates.values()];
+  }
+
   private async fetchArtifact(candidate: ArtifactCandidate): Promise<DiscoveredArtifact> {
     const response = await this.fetchResponse(candidate.url, candidate.type);
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
@@ -131,8 +245,14 @@ export class BundleScraper {
       });
     }
 
-    const content = await response.text();
-    const resolvedType = contentType.includes("text/html") ? "html" : candidate.type;
+    const rawContent = await response.text();
+    const resolvedType = contentType.includes("text/html")
+      ? "html"
+      : contentType.includes("application/json") && candidate.type === "source-map"
+        ? "source-map"
+        : candidate.type;
+
+    const content = resolvedType === "source-map" ? summarizeSourceMap(rawContent, candidate.url) : rawContent;
 
     return discoveredArtifactSchema.parse({
       url: candidate.url,
@@ -162,6 +282,24 @@ export class BundleScraper {
       }
 
       throw new Error(`Unable to fetch ${artifactType} artifact ${url}.`);
+    }
+  }
+
+  private async fetchOptionalText(url: string): Promise<string | null> {
+    try {
+      const response = await this.fetcher(url, {
+        headers: {
+          "user-agent": "mapr/0.2.0",
+        },
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      return await response.text();
+    } catch {
+      return null;
     }
   }
 }

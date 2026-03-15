@@ -6,9 +6,15 @@ export const artifactTypeSchema = z.enum([
   "script",
   "service-worker",
   "worker",
-  "stylesheet",
-  "manifest",
-  "json",
+  "source-map",
+  "wasm",
+]);
+
+export const analyzableArtifactTypeSchema = z.enum([
+  "script",
+  "service-worker",
+  "worker",
+  "source-map",
   "wasm",
 ]);
 
@@ -29,6 +35,9 @@ export const artifactCandidateSchema = z.object({
 export type ArtifactType = z.infer<typeof artifactTypeSchema>;
 export type DiscoveredArtifact = z.infer<typeof discoveredArtifactSchema>;
 export type ArtifactCandidate = z.infer<typeof artifactCandidateSchema>;
+
+const binaryOrVisualAssetPattern =
+  /\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|mp4|webm|mov|avi|mp3|wav|ogg|flac|aac|m4a|pdf|zip|gz|tar|7z|rar|woff2?|ttf|otf|eot)(?:$|[?#])/i;
 
 function makeCandidate(url: string, type: ArtifactType, discoveredFrom: string): ArtifactCandidate | null {
   const parsed = artifactCandidateSchema.safeParse({ url, type, discoveredFrom });
@@ -61,6 +70,10 @@ function resolveCandidateUrl(reference: string, baseUrl: string): string | null 
 
   try {
     const absoluteUrl = new URL(reference, baseUrl).toString();
+    if (binaryOrVisualAssetPattern.test(new URL(absoluteUrl).pathname)) {
+      return null;
+    }
+
     const parsed = z.string().url().safeParse(absoluteUrl);
     return parsed.success ? parsed.data : null;
   } catch {
@@ -75,16 +88,8 @@ function inferAssetTypeFromUrl(url: string, fallback: ArtifactType = "script"): 
     return "wasm";
   }
 
-  if (pathname.endsWith(".css")) {
-    return "stylesheet";
-  }
-
-  if (pathname.endsWith(".json")) {
-    return "json";
-  }
-
-  if (pathname.endsWith(".webmanifest") || pathname.endsWith("manifest.json")) {
-    return "manifest";
+  if (pathname.endsWith(".map")) {
+    return "source-map";
   }
 
   if (pathname.endsWith(".html") || pathname.endsWith(".htm")) {
@@ -94,14 +99,34 @@ function inferAssetTypeFromUrl(url: string, fallback: ArtifactType = "script"): 
   return fallback;
 }
 
+function extractPageCandidate(reference: string, pageUrl: string, discoveredFrom: string): ArtifactCandidate | null {
+  const resolvedUrl = resolveCandidateUrl(reference, pageUrl);
+  if (!resolvedUrl) {
+    return null;
+  }
+
+  const pathname = new URL(resolvedUrl).pathname.toLowerCase();
+  const looksLikePage =
+    pathname === "" ||
+    pathname.endsWith("/") ||
+    pathname.endsWith(".html") ||
+    pathname.endsWith(".htm") ||
+    !/\.[a-z0-9]+$/i.test(pathname);
+
+  return looksLikePage ? makeCandidate(resolvedUrl, "html", discoveredFrom) : null;
+}
+
 function extractFromJavaScript(source: string, baseUrl: string, discoveredFrom: string): ArtifactCandidate[] {
   const candidates = new Map<string, ArtifactCandidate>();
   const regexDefinitions: Array<{ regex: RegExp; type: ArtifactType }> = [
     { regex: /(?:import|export)\s+(?:[^"'`]+?\s+from\s+)?["'`]([^"'`]+)["'`]/g, type: "script" },
     { regex: /import\(\s*["'`]([^"'`]+)["'`]\s*\)/g, type: "script" },
+    { regex: /importScripts\(\s*["'`]([^"'`]+)["'`]\s*\)/g, type: "script" },
     { regex: /navigator\.serviceWorker\.register\(\s*(?:new\s+URL\(\s*)?["'`]([^"'`]+)["'`]/g, type: "service-worker" },
     { regex: /new\s+(?:SharedWorker|Worker)\(\s*(?:new\s+URL\(\s*)?["'`]([^"'`]+)["'`]/g, type: "worker" },
-    { regex: /["'`]([^"'`]+\.wasm(?:\?[^"'`]*)?)["'`]/g, type: "wasm" },
+    { regex: /new\s+URL\(\s*["'`]([^"'`]+)["'`]\s*,\s*import\.meta\.url\s*\)/g, type: "script" },
+    { regex: /["'`]([^"'`]+\.(?:m?js|cjs|wasm|map)(?:\?[^"'`]*)?)["'`]/g, type: "script" },
+    { regex: /[@#]\s*sourceMappingURL=([^\s]+)/g, type: "source-map" },
   ];
 
   for (const definition of regexDefinitions) {
@@ -124,31 +149,8 @@ function extractFromJavaScript(source: string, baseUrl: string, discoveredFrom: 
   return [...candidates.values()];
 }
 
-function extractFromCss(source: string, baseUrl: string, discoveredFrom: string): ArtifactCandidate[] {
-  const candidates = new Map<string, ArtifactCandidate>();
-  const regexDefinitions = [
-    /@import\s+(?:url\()?["']?([^"'()]+)["']?\)?/g,
-    /url\(\s*["']?([^"'()]+)["']?\s*\)/g,
-  ];
-
-  for (const regex of regexDefinitions) {
-    let match: RegExpExecArray | null;
-    while ((match = regex.exec(source)) !== null) {
-      const resolvedUrl = resolveCandidateUrl(match[1] ?? "", baseUrl);
-      if (!resolvedUrl) {
-        continue;
-      }
-
-      addCandidate(
-        candidates,
-        makeCandidate(resolvedUrl, inferAssetTypeFromUrl(resolvedUrl, "stylesheet"), discoveredFrom),
-        false,
-        new URL(baseUrl).origin,
-      );
-    }
-  }
-
-  return [...candidates.values()];
+export function isAnalyzableArtifactType(type: ArtifactType): type is z.infer<typeof analyzableArtifactTypeSchema> {
+  return analyzableArtifactTypeSchema.safeParse(type).success;
 }
 
 export function extractArtifactCandidates(html: string, pageUrl: string): ArtifactCandidate[] {
@@ -170,40 +172,15 @@ export function extractArtifactCandidates(html: string, pageUrl: string): Artifa
     const rel = ($(element).attr("rel") ?? "").toLowerCase();
     const asValue = ($(element).attr("as") ?? "").toLowerCase();
 
-    if (rel.includes("manifest")) {
-      addCandidate(candidates, makeCandidate(href, "manifest", "html:manifest"), false, origin);
-      return;
-    }
-
-    if (rel.includes("stylesheet")) {
-      addCandidate(candidates, makeCandidate(href, "stylesheet", "html:stylesheet"), false, origin);
-      return;
-    }
-
     if (rel.includes("modulepreload") || (rel.includes("preload") && asValue === "script")) {
-      addCandidate(candidates, makeCandidate(href, "script", "html:preload"), false, origin);
+      addCandidate(candidates, makeCandidate(href, inferAssetTypeFromUrl(href, "script"), "html:preload"), false, origin);
     }
   });
 
-  $("a[href]").each((_, element) => {
-    const href = resolveCandidateUrl($(element).attr("href")?.trim() ?? "", pageUrl);
-    if (!href) {
-      return;
-    }
-
-    const url = new URL(href);
-    const isSameOrigin = url.origin === origin;
-    const pathname = url.pathname.toLowerCase();
-    const looksLikePage =
-      pathname === "" ||
-      pathname.endsWith("/") ||
-      pathname.endsWith(".html") ||
-      pathname.endsWith(".htm") ||
-      !/\.[a-z0-9]+$/i.test(pathname);
-
-    if (isSameOrigin && looksLikePage) {
-      addCandidate(candidates, makeCandidate(href, "html", "html:anchor"), true, origin);
-    }
+  $("a[href], iframe[src], form[action]").each((_, element) => {
+    const attributeName = element.tagName === "iframe" ? "src" : element.tagName === "form" ? "action" : "href";
+    const pageCandidate = extractPageCandidate($(element).attr(attributeName)?.trim() ?? "", pageUrl, `html:${element.tagName}`);
+    addCandidate(candidates, pageCandidate, true, origin);
   });
 
   $("script:not([src])").each((_, element) => {
@@ -221,12 +198,13 @@ export function extractNestedCandidates(artifact: DiscoveredArtifact): ArtifactC
     return extractArtifactCandidates(artifact.content, artifact.url);
   }
 
-  if (artifact.type === "script" || artifact.type === "service-worker" || artifact.type === "worker") {
+  if (
+    artifact.type === "script" ||
+    artifact.type === "service-worker" ||
+    artifact.type === "worker" ||
+    artifact.type === "source-map"
+  ) {
     return extractFromJavaScript(artifact.content, artifact.url, `${artifact.type}:code`);
-  }
-
-  if (artifact.type === "stylesheet") {
-    return extractFromCss(artifact.content, artifact.url, "stylesheet:code");
   }
 
   return [];

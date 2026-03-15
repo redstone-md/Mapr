@@ -20,10 +20,7 @@ function resolvePrettierParser(artifactType: FormattedArtifact["type"]): "babel"
   switch (artifactType) {
     case "html":
       return "html";
-    case "stylesheet":
-      return "css";
-    case "manifest":
-    case "json":
+    case "source-map":
       return "json";
     case "script":
     case "service-worker":
