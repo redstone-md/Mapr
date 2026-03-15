@@ -1,7 +1,19 @@
-import { generateText, Output } from "ai";
-import { Buffer } from "buffer";
 import { z } from "zod";
+import { Buffer } from "buffer";
 
+import {
+  agentMemoSchema,
+  artifactSummarySchema,
+  buildAnalysisSnapshot,
+  chunkAnalysisSchema,
+  finalAnalysisSchema,
+  type AgentMemo,
+  type ArtifactSummary,
+  type BundleAnalysis,
+  type ChunkAnalysis,
+  PartialAnalysisError,
+} from "./analysis-schema";
+import { generateObjectWithTextFallback } from "./ai-json";
 import { artifactTypeSchema } from "./artifacts";
 import type { FormattedArtifact } from "./formatter";
 import { LocalArtifactRag } from "./local-rag";
@@ -9,63 +21,6 @@ import { AiProviderClient, type AiProviderConfig } from "./provider";
 import { SWARM_AGENT_ORDER, getGlobalMissionPrompt, getSwarmAgentPrompt, type SwarmAgentName } from "./swarm-prompts";
 
 export const DEFAULT_CHUNK_SIZE_BYTES = 80 * 1024;
-
-const entryPointSchema = z.object({
-  symbol: z.string().min(1),
-  description: z.string().min(1),
-  evidence: z.string().min(1),
-});
-
-const callGraphEdgeSchema = z.object({
-  caller: z.string().min(1),
-  callee: z.string().min(1),
-  rationale: z.string().min(1),
-});
-
-const renamedSymbolSchema = z.object({
-  originalName: z.string().min(1),
-  suggestedName: z.string().min(1),
-  justification: z.string().min(1),
-});
-
-const agentMemoSchema = z.object({
-  role: z.string().min(1),
-  summary: z.string().min(1),
-  observations: z.array(z.string().min(1)).default([]),
-  evidence: z.array(z.string().min(1)).default([]),
-  nextQuestions: z.array(z.string().min(1)).default([]),
-});
-
-const chunkAnalysisSchema = z.object({
-  entryPoints: z.array(entryPointSchema).default([]),
-  initializationFlow: z.array(z.string().min(1)).default([]),
-  callGraph: z.array(callGraphEdgeSchema).default([]),
-  restoredNames: z.array(renamedSymbolSchema).default([]),
-  summary: z.string().min(1),
-  notableLibraries: z.array(z.string().min(1)).default([]),
-  investigationTips: z.array(z.string().min(1)).default([]),
-  risks: z.array(z.string().min(1)).default([]),
-});
-
-const artifactSummarySchema = z.object({
-  url: z.string().url(),
-  type: artifactTypeSchema,
-  chunkCount: z.number().int().nonnegative(),
-  summary: z.string().min(1),
-});
-
-const finalAnalysisSchema = z.object({
-  overview: z.string().min(1),
-  entryPoints: z.array(entryPointSchema).default([]),
-  initializationFlow: z.array(z.string().min(1)).default([]),
-  callGraph: z.array(callGraphEdgeSchema).default([]),
-  restoredNames: z.array(renamedSymbolSchema).default([]),
-  notableLibraries: z.array(z.string().min(1)).default([]),
-  investigationTips: z.array(z.string().min(1)).default([]),
-  risks: z.array(z.string().min(1)).default([]),
-  artifactSummaries: z.array(artifactSummarySchema),
-  analyzedChunkCount: z.number().int().nonnegative(),
-});
 
 const analyzeInputSchema = z.object({
   pageUrl: z.string().url(),
@@ -82,8 +37,6 @@ const analyzeInputSchema = z.object({
     }),
   ),
 });
-
-export type BundleAnalysis = z.infer<typeof finalAnalysisSchema>;
 export type AnalysisProgressStage = "artifact" | "chunk" | "agent";
 export type AnalysisProgressState = "started" | "completed";
 
@@ -104,16 +57,6 @@ interface AnalyzerOptions {
   chunkSizeBytes?: number;
   localRag?: boolean;
   onProgress?: (event: AnalysisProgressEvent) => void;
-}
-
-export class PartialAnalysisError extends Error {
-  public readonly partialAnalysis: BundleAnalysis;
-
-  public constructor(message: string, partialAnalysis: BundleAnalysis) {
-    super(message);
-    this.name = "PartialAnalysisError";
-    this.partialAnalysis = partialAnalysis;
-  }
 }
 
 function createPromptEnvelope(input: {
@@ -193,23 +136,6 @@ export function chunkTextByBytes(source: string, maxBytes = DEFAULT_CHUNK_SIZE_B
   return chunks;
 }
 
-function deduplicate<T>(items: T[], keySelector: (item: T) => string): T[] {
-  const seen = new Set<string>();
-  const deduplicated: T[] = [];
-
-  for (const item of items) {
-    const key = keySelector(item);
-    if (seen.has(key)) {
-      continue;
-    }
-
-    seen.add(key);
-    deduplicated.push(item);
-  }
-
-  return deduplicated;
-}
-
 function normalizeAiError(error: unknown): Error {
   if (!(error instanceof Error)) {
     return new Error("AI analysis failed with an unknown error.");
@@ -225,49 +151,6 @@ function normalizeAiError(error: unknown): Error {
   }
 
   return error;
-}
-
-export function buildAnalysisSnapshot(input: {
-  overview: string;
-  artifactSummaries?: Array<z.infer<typeof artifactSummarySchema>>;
-  chunkAnalyses?: Array<z.infer<typeof chunkAnalysisSchema>>;
-}): BundleAnalysis {
-  const artifactSummaries = input.artifactSummaries ?? [];
-  const chunkAnalyses = input.chunkAnalyses ?? [];
-
-  return finalAnalysisSchema.parse({
-    overview: input.overview,
-    entryPoints: deduplicate(
-      chunkAnalyses.flatMap((analysis) => analysis.entryPoints),
-      (entryPoint) => `${entryPoint.symbol}:${entryPoint.description}`,
-    ),
-    initializationFlow: deduplicate(
-      chunkAnalyses.flatMap((analysis) => analysis.initializationFlow),
-      (step) => step,
-    ),
-    callGraph: deduplicate(
-      chunkAnalyses.flatMap((analysis) => analysis.callGraph),
-      (edge) => `${edge.caller}->${edge.callee}`,
-    ),
-    restoredNames: deduplicate(
-      chunkAnalyses.flatMap((analysis) => analysis.restoredNames),
-      (entry) => `${entry.originalName}:${entry.suggestedName}`,
-    ),
-    notableLibraries: deduplicate(
-      chunkAnalyses.flatMap((analysis) => analysis.notableLibraries),
-      (library) => library,
-    ),
-    investigationTips: deduplicate(
-      chunkAnalyses.flatMap((analysis) => analysis.investigationTips),
-      (tip) => tip,
-    ),
-    risks: deduplicate(
-      chunkAnalyses.flatMap((analysis) => analysis.risks),
-      (risk) => risk,
-    ),
-    artifactSummaries,
-    analyzedChunkCount: chunkAnalyses.length,
-  });
 }
 
 export class AiBundleAnalyzer {
@@ -301,8 +184,8 @@ export class AiBundleAnalyzer {
       });
     }
 
-    const chunkAnalyses: Array<z.infer<typeof chunkAnalysisSchema>> = [];
-    const artifactSummaries: Array<z.infer<typeof artifactSummarySchema>> = [];
+    const chunkAnalyses: ChunkAnalysis[] = [];
+    const artifactSummaries: ArtifactSummary[] = [];
 
     try {
       const localRag = this.localRagEnabled ? new LocalArtifactRag(validatedInput.artifacts) : null;
@@ -310,7 +193,7 @@ export class AiBundleAnalyzer {
       for (let artifactIndex = 0; artifactIndex < validatedInput.artifacts.length; artifactIndex += 1) {
         const artifact = validatedInput.artifacts[artifactIndex]!;
         const chunks = chunkTextByBytes(artifact.formattedContent || artifact.content, this.chunkSizeBytes);
-        const perArtifactChunkAnalyses: Array<z.infer<typeof chunkAnalysisSchema>> = [];
+        const perArtifactChunkAnalyses: ChunkAnalysis[] = [];
 
         this.emitProgress({
           stage: "artifact",
@@ -401,8 +284,8 @@ export class AiBundleAnalyzer {
     artifactIndex: number;
     artifactCount: number;
     localRag: LocalArtifactRag | null;
-  }): Promise<z.infer<typeof chunkAnalysisSchema>> {
-    const memory: Partial<Record<SwarmAgentName, z.infer<typeof agentMemoSchema> | z.infer<typeof chunkAnalysisSchema>>> = {};
+  }): Promise<ChunkAnalysis> {
+    const memory: Partial<Record<SwarmAgentName, AgentMemo | ChunkAnalysis>> = {};
 
     for (const agent of SWARM_AGENT_ORDER) {
       this.emitProgress({
@@ -452,8 +335,8 @@ export class AiBundleAnalyzer {
     },
     memory: Partial<Record<SwarmAgentName, unknown>>,
     retrievedContext: string[],
-  ): Promise<z.infer<typeof agentMemoSchema>> {
-    const result = await generateText({
+  ): Promise<AgentMemo> {
+    return generateObjectWithTextFallback({
       model: this.providerClient.getModel(),
       system: getSwarmAgentPrompt(agent),
       prompt: createPromptEnvelope({
@@ -465,7 +348,11 @@ export class AiBundleAnalyzer {
         memory,
         retrievedContext,
       }),
-      output: Output.object({ schema: agentMemoSchema }),
+      schema: agentMemoSchema,
+      contract: [
+        "JSON contract:",
+        '{"role":"string","summary":"string","observations":["string"],"evidence":["string"],"nextQuestions":["string"]}',
+      ].join("\n"),
       maxRetries: 2,
       providerOptions: {
         openai: {
@@ -473,8 +360,6 @@ export class AiBundleAnalyzer {
         },
       },
     });
-
-    return agentMemoSchema.parse(result.output);
   }
 
   private async runSynthesisAgent(
@@ -487,8 +372,8 @@ export class AiBundleAnalyzer {
     },
     memory: Partial<Record<SwarmAgentName, unknown>>,
     retrievedContext: string[],
-  ): Promise<z.infer<typeof chunkAnalysisSchema>> {
-    const result = await generateText({
+  ): Promise<ChunkAnalysis> {
+    return generateObjectWithTextFallback({
       model: this.providerClient.getModel(),
       system: getSwarmAgentPrompt("synthesizer"),
       prompt: createPromptEnvelope({
@@ -500,7 +385,11 @@ export class AiBundleAnalyzer {
         memory,
         retrievedContext,
       }),
-      output: Output.object({ schema: chunkAnalysisSchema }),
+      schema: chunkAnalysisSchema,
+      contract: [
+        "JSON contract:",
+        '{"entryPoints":[{"symbol":"string","description":"string","evidence":"string"}],"initializationFlow":["string"],"callGraph":[{"caller":"string","callee":"string","rationale":"string"}],"restoredNames":[{"originalName":"string","suggestedName":"string","justification":"string"}],"summary":"string","notableLibraries":["string"],"investigationTips":["string"],"risks":["string"]}',
+      ].join("\n"),
       maxRetries: 2,
       providerOptions: {
         openai: {
@@ -508,17 +397,15 @@ export class AiBundleAnalyzer {
         },
       },
     });
-
-    return chunkAnalysisSchema.parse(result.output);
   }
 
   private async summarizeFindings(
     pageUrl: string,
-    artifactSummaries: Array<z.infer<typeof artifactSummarySchema>>,
-    chunkAnalyses: Array<z.infer<typeof chunkAnalysisSchema>>,
+    artifactSummaries: ArtifactSummary[],
+    chunkAnalyses: ChunkAnalysis[],
   ): Promise<BundleAnalysis> {
     try {
-      const result = await generateText({
+      const result = await generateObjectWithTextFallback({
         model: this.providerClient.getModel(),
         system: [
           getGlobalMissionPrompt(),
@@ -532,12 +419,14 @@ export class AiBundleAnalyzer {
           "Chunk analyses:",
           JSON.stringify(chunkAnalyses, null, 2),
         ].join("\n\n"),
-        output: Output.object({
-          schema: finalAnalysisSchema.omit({
-            artifactSummaries: true,
-            analyzedChunkCount: true,
-          }),
+        schema: finalAnalysisSchema.omit({
+          artifactSummaries: true,
+          analyzedChunkCount: true,
         }),
+        contract: [
+          "JSON contract:",
+          '{"overview":"string","entryPoints":[{"symbol":"string","description":"string","evidence":"string"}],"initializationFlow":["string"],"callGraph":[{"caller":"string","callee":"string","rationale":"string"}],"restoredNames":[{"originalName":"string","suggestedName":"string","justification":"string"}],"notableLibraries":["string"],"investigationTips":["string"],"risks":["string"]}',
+        ].join("\n"),
         maxRetries: 2,
         providerOptions: {
           openai: {
@@ -547,7 +436,7 @@ export class AiBundleAnalyzer {
       });
 
       return finalAnalysisSchema.parse({
-        ...result.output,
+        ...result,
         artifactSummaries,
         analyzedChunkCount: chunkAnalyses.length,
       });

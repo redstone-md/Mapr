@@ -6,11 +6,14 @@ import {
   discoveredArtifactSchema,
   extractArtifactCandidates,
   extractNestedCandidates,
+  isIgnoredContentType,
   isAnalyzableArtifactType,
   type ArtifactCandidate,
   type DiscoveredArtifact,
 } from "./artifacts";
 import { WasmModuleSummarizer } from "./wasm";
+
+const MAPR_USER_AGENT = "mapr";
 
 const httpUrlSchema = z
   .string()
@@ -21,6 +24,7 @@ const httpUrlSchema = z
 const scraperOptionsSchema = z.object({
   maxPages: z.number().int().positive().default(20),
   maxArtifacts: z.number().int().positive().default(400),
+  maxDepth: z.number().int().nonnegative().default(3),
 });
 
 export interface ScrapeResult {
@@ -31,7 +35,19 @@ export interface ScrapeResult {
 }
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-type ScraperOptions = z.input<typeof scraperOptionsSchema>;
+type NumericScraperOptions = z.input<typeof scraperOptionsSchema>;
+type QueueEntry = { candidate: ArtifactCandidate; depth: number };
+
+export interface ScraperProgressEvent {
+  message: string;
+  url: string;
+  type: ArtifactCandidate["type"];
+  depth: number;
+}
+
+interface ScraperOptions extends NumericScraperOptions {
+  onProgress?: (event: ScraperProgressEvent) => void;
+}
 
 function isPageCandidate(candidate: ArtifactCandidate, rootOrigin: string): boolean {
   return candidate.type === "html" && new URL(candidate.url).origin === rootOrigin;
@@ -121,12 +137,14 @@ function summarizeSourceMap(rawMap: string, mapUrl: string): string {
 export class BundleScraper {
   private readonly options: z.infer<typeof scraperOptionsSchema>;
   private readonly wasmSummarizer = new WasmModuleSummarizer();
+  private readonly onProgress: ((event: ScraperProgressEvent) => void) | undefined;
 
   public constructor(
     private readonly fetcher: FetchLike = fetch,
     options: ScraperOptions = {},
   ) {
     this.options = scraperOptionsSchema.parse(options);
+    this.onProgress = options.onProgress;
   }
 
   public async scrape(pageUrl: string): Promise<ScrapeResult> {
@@ -135,23 +153,38 @@ export class BundleScraper {
     const visitedUrls = new Set<string>();
     const htmlPages = new Set<string>();
     const artifacts: DiscoveredArtifact[] = [];
-    const queue: ArtifactCandidate[] = [
-      artifactCandidateSchema.parse({
-        url: validatedPageUrl,
-        type: "html",
-        discoveredFrom: "root",
-      }),
+    const queue: QueueEntry[] = [
+      {
+        candidate: artifactCandidateSchema.parse({
+          url: validatedPageUrl,
+          type: "html",
+          discoveredFrom: "root",
+        }),
+        depth: 0,
+      },
     ];
 
-    queue.push(...(await this.discoverSupplementalPages(rootOrigin)));
+    queue.push(...(await this.discoverSupplementalPages(rootOrigin)).map((candidate) => ({ candidate, depth: 1 })));
 
     while (queue.length > 0) {
       if (artifacts.length >= this.options.maxArtifacts) {
         break;
       }
 
-      const candidate = queue.shift();
-      if (!candidate || visitedUrls.has(candidate.url)) {
+      const entry = queue.shift();
+      if (!entry || visitedUrls.has(entry.candidate.url)) {
+        continue;
+      }
+
+      const { candidate, depth } = entry;
+
+      if (depth > this.options.maxDepth) {
+        this.emitProgress({
+          message: `Skipping ${candidate.type} beyond crawl depth ${this.options.maxDepth}: ${candidate.url}`,
+          url: candidate.url,
+          type: candidate.type,
+          depth,
+        });
         continue;
       }
 
@@ -164,7 +197,17 @@ export class BundleScraper {
       }
 
       visitedUrls.add(candidate.url);
-      const artifact = await this.fetchArtifact(candidate);
+      this.emitProgress({
+        message: `Fetching ${candidate.type} depth ${depth}: ${candidate.url}`,
+        url: candidate.url,
+        type: candidate.type,
+        depth,
+      });
+
+      const artifact = await this.fetchArtifact(candidate, depth);
+      if (!artifact) {
+        continue;
+      }
 
       if (artifact.type === "html") {
         htmlPages.add(artifact.url);
@@ -177,8 +220,17 @@ export class BundleScraper {
       const nestedCandidates = extractNestedCandidates(artifact);
       for (const nestedCandidate of nestedCandidates) {
         if (!visitedUrls.has(nestedCandidate.url)) {
-          queue.push(nestedCandidate);
+          queue.push({ candidate: nestedCandidate, depth: depth + 1 });
         }
+      }
+
+      if (nestedCandidates.length > 0) {
+        this.emitProgress({
+          message: `Discovered ${nestedCandidates.length} nested candidate(s) from ${artifact.url}`,
+          url: artifact.url,
+          type: artifact.type,
+          depth,
+        });
       }
     }
 
@@ -227,9 +279,29 @@ export class BundleScraper {
     return [...candidates.values()];
   }
 
-  private async fetchArtifact(candidate: ArtifactCandidate): Promise<DiscoveredArtifact> {
+  private async fetchArtifact(candidate: ArtifactCandidate, depth: number): Promise<DiscoveredArtifact | null> {
     const response = await this.fetchResponse(candidate.url, candidate.type);
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+
+    if (isIgnoredContentType(contentType)) {
+      this.emitProgress({
+        message: `Skipping binary or font asset returned from ${candidate.url}`,
+        url: candidate.url,
+        type: candidate.type,
+        depth,
+      });
+      return null;
+    }
+
+    if (candidate.type === "html" && !contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
+      this.emitProgress({
+        message: `Skipping non-HTML response for discovered page ${candidate.url}`,
+        url: candidate.url,
+        type: candidate.type,
+        depth,
+      });
+      return null;
+    }
 
     if (candidate.type === "wasm" || contentType.includes("application/wasm")) {
       const bytes = new Uint8Array(await response.arrayBuffer());
@@ -267,7 +339,7 @@ export class BundleScraper {
     try {
       const response = await this.fetcher(url, {
         headers: {
-          "user-agent": "mapr/0.2.0",
+          "user-agent": MAPR_USER_AGENT,
         },
       });
 
@@ -289,7 +361,7 @@ export class BundleScraper {
     try {
       const response = await this.fetcher(url, {
         headers: {
-          "user-agent": "mapr/0.2.0",
+          "user-agent": MAPR_USER_AGENT,
         },
       });
 
@@ -301,6 +373,10 @@ export class BundleScraper {
     } catch {
       return null;
     }
+  }
+
+  private emitProgress(event: ScraperProgressEvent): void {
+    this.onProgress?.(event);
   }
 }
 

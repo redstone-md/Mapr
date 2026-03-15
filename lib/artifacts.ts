@@ -38,6 +38,8 @@ export type ArtifactCandidate = z.infer<typeof artifactCandidateSchema>;
 
 const binaryOrVisualAssetPattern =
   /\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|mp4|webm|mov|avi|mp3|wav|ogg|flac|aac|m4a|pdf|zip|gz|tar|7z|rar|woff2?|ttf|otf|eot)(?:$|[?#])/i;
+const ignoredContentTypePattern =
+  /^(?:image\/|audio\/|video\/|font\/|application\/(?:font|octet-stream|pdf|zip|gzip|x-font|vnd\.ms-fontobject))/i;
 
 function makeCandidate(url: string, type: ArtifactType, discoveredFrom: string): ArtifactCandidate | null {
   const parsed = artifactCandidateSchema.safeParse({ url, type, discoveredFrom });
@@ -151,6 +153,10 @@ function extractFromJavaScript(source: string, baseUrl: string, discoveredFrom: 
 
 export function isAnalyzableArtifactType(type: ArtifactType): type is z.infer<typeof analyzableArtifactTypeSchema> {
   return analyzableArtifactTypeSchema.safeParse(type).success;
+}
+
+export function isIgnoredContentType(contentType: string): boolean {
+  return ignoredContentTypePattern.test(contentType.trim().toLowerCase());
 }
 
 export function extractArtifactCandidates(html: string, pageUrl: string): ArtifactCandidate[] {
