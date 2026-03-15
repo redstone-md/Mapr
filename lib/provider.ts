@@ -4,6 +4,7 @@ import { z } from "zod";
 
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const DEFAULT_MODEL = "gpt-4.1-mini";
+export const DEFAULT_MODEL_CONTEXT_SIZE = 128000;
 
 export const providerTypeSchema = z.enum(["openai", "openai-compatible"]);
 
@@ -13,6 +14,7 @@ export const aiProviderConfigSchema = z.object({
   apiKey: z.string().min(1, "API key is required."),
   baseURL: z.string().trim().url("Base URL must be a valid URL.").default(DEFAULT_OPENAI_BASE_URL),
   model: z.string().min(1).default(DEFAULT_MODEL),
+  modelContextSize: z.number().int().positive().default(DEFAULT_MODEL_CONTEXT_SIZE),
 });
 
 const modelListResponseSchema = z.object({

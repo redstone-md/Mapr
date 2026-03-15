@@ -9,6 +9,8 @@ import type { FormattedArtifact } from "./formatter";
 const reportInputSchema = z.object({
   targetUrl: z.string().url(),
   htmlPages: z.array(z.string().url()),
+  reportStatus: z.enum(["complete", "partial"]).default("complete"),
+  analysisError: z.string().min(1).optional(),
   artifacts: z.array(
     z.object({
       url: z.string().url(),
@@ -60,6 +62,8 @@ const reportInputSchema = z.object({
   }),
 });
 
+type ReportInput = z.infer<typeof reportInputSchema>;
+
 function formatBulletList(items: string[], emptyState: string): string {
   return items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : `- ${emptyState}`;
 }
@@ -86,12 +90,7 @@ function formatArtifactTable(artifacts: FormattedArtifact[]): string {
 }
 
 export class ReportWriter {
-  public generateMarkdown(input: {
-    targetUrl: string;
-    htmlPages: string[];
-    artifacts: FormattedArtifact[];
-    analysis: BundleAnalysis;
-  }): string {
+  public generateMarkdown(input: ReportInput): string {
     const report = reportInputSchema.parse(input);
 
     const entryPointsSection =
@@ -130,10 +129,14 @@ export class ReportWriter {
       "",
       `- Target URL: ${report.targetUrl}`,
       `- Generated: ${new Date().toISOString()}`,
+      `- Report status: ${report.reportStatus}`,
       `- HTML pages crawled: ${report.htmlPages.length}`,
       `- Artifacts analyzed: ${report.artifacts.length}`,
       `- AI chunks analyzed: ${report.analysis.analyzedChunkCount}`,
       "",
+      report.analysisError ? "## Analysis Status" : undefined,
+      report.analysisError ? `- Analysis ended early: ${report.analysisError}` : undefined,
+      report.analysisError ? "" : undefined,
       "## Website Surface",
       "",
       formatBulletList(report.htmlPages, "No HTML pages crawled beyond the entry page"),
@@ -177,21 +180,32 @@ export class ReportWriter {
       "## Downloaded Artifacts",
       "",
       formatArtifactTable(report.artifacts),
-    ].join("\n");
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join("\n");
   }
 
   public async writeReport(input: {
     targetUrl: string;
     htmlPages: string[];
+    reportStatus?: "complete" | "partial";
+    analysisError?: string;
     artifacts: FormattedArtifact[];
     analysis: BundleAnalysis;
+    outputPathOverride?: string;
   }): Promise<string> {
-    const validatedInput = reportInputSchema.parse(input);
+    const { outputPathOverride, ...reportInput } = input;
+    const validatedInput = reportInputSchema.parse(reportInput);
     const reportContent = this.generateMarkdown(validatedInput);
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const domain = new URL(validatedInput.targetUrl).hostname.replace(/[^a-zA-Z0-9.-]/g, "-");
-    const fileName = `report-${domain}-${timestamp}.md`;
-    const outputPath = resolve(process.cwd(), fileName);
+    const outputPath =
+      outputPathOverride !== undefined
+        ? resolve(process.cwd(), outputPathOverride)
+        : resolve(
+            process.cwd(),
+            `report-${new URL(validatedInput.targetUrl).hostname.replace(/[^a-zA-Z0-9.-]/g, "-")}-${new Date()
+              .toISOString()
+              .replace(/[:.]/g, "-")}.md`,
+          );
 
     await writeFile(outputPath, `${reportContent}\n`, "utf8");
     return outputPath;

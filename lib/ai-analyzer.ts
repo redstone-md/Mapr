@@ -4,7 +4,9 @@ import { z } from "zod";
 
 import { artifactTypeSchema } from "./artifacts";
 import type { FormattedArtifact } from "./formatter";
+import { LocalArtifactRag } from "./local-rag";
 import { AiProviderClient, type AiProviderConfig } from "./provider";
+import { SWARM_AGENT_ORDER, getGlobalMissionPrompt, getSwarmAgentPrompt, type SwarmAgentName } from "./swarm-prompts";
 
 export const DEFAULT_CHUNK_SIZE_BYTES = 80 * 1024;
 
@@ -24,6 +26,14 @@ const renamedSymbolSchema = z.object({
   originalName: z.string().min(1),
   suggestedName: z.string().min(1),
   justification: z.string().min(1),
+});
+
+const agentMemoSchema = z.object({
+  role: z.string().min(1),
+  summary: z.string().min(1),
+  observations: z.array(z.string().min(1)).default([]),
+  evidence: z.array(z.string().min(1)).default([]),
+  nextQuestions: z.array(z.string().min(1)).default([]),
 });
 
 const chunkAnalysisSchema = z.object({
@@ -57,17 +67,6 @@ const finalAnalysisSchema = z.object({
   analyzedChunkCount: z.number().int().nonnegative(),
 });
 
-const analyzerOptionsSchema = z.object({
-  providerConfig: z.object({
-    providerType: z.enum(["openai", "openai-compatible"]),
-    providerName: z.string().min(1),
-    apiKey: z.string().min(1),
-    baseURL: z.string().url(),
-    model: z.string().min(1),
-  }),
-  chunkSizeBytes: z.number().int().positive().max(100 * 1024).default(DEFAULT_CHUNK_SIZE_BYTES),
-});
-
 const analyzeInputSchema = z.object({
   pageUrl: z.string().url(),
   artifacts: z.array(
@@ -85,11 +84,64 @@ const analyzeInputSchema = z.object({
 });
 
 export type BundleAnalysis = z.infer<typeof finalAnalysisSchema>;
+export type AnalysisProgressStage = "artifact" | "chunk" | "agent";
+export type AnalysisProgressState = "started" | "completed";
 
-type AnalyzerOptions = {
+export interface AnalysisProgressEvent {
+  stage: AnalysisProgressStage;
+  state: AnalysisProgressState;
+  message: string;
+  artifactIndex: number;
+  artifactCount: number;
+  artifactUrl: string;
+  chunkIndex?: number;
+  chunkCount?: number;
+  agent?: SwarmAgentName;
+}
+
+interface AnalyzerOptions {
   providerConfig: AiProviderConfig;
   chunkSizeBytes?: number;
-};
+  localRag?: boolean;
+  onProgress?: (event: AnalysisProgressEvent) => void;
+}
+
+export class PartialAnalysisError extends Error {
+  public readonly partialAnalysis: BundleAnalysis;
+
+  public constructor(message: string, partialAnalysis: BundleAnalysis) {
+    super(message);
+    this.name = "PartialAnalysisError";
+    this.partialAnalysis = partialAnalysis;
+  }
+}
+
+function createPromptEnvelope(input: {
+  pageUrl: string;
+  artifact: FormattedArtifact;
+  chunk: string;
+  chunkIndex: number;
+  totalChunks: number;
+  memory?: unknown;
+  retrievedContext?: string[];
+}): string {
+  return [
+    `Target page: ${input.pageUrl}`,
+    `Artifact URL: ${input.artifact.url}`,
+    `Artifact type: ${input.artifact.type}`,
+    `Discovered from: ${input.artifact.discoveredFrom}`,
+    `Chunk ${input.chunkIndex + 1} of ${input.totalChunks}`,
+    input.artifact.formattingNote ? `Formatting note: ${input.artifact.formattingNote}` : "Formatting note: none",
+    input.memory ? `Swarm memory:\n${JSON.stringify(input.memory, null, 2)}` : "Swarm memory: none yet",
+    input.retrievedContext && input.retrievedContext.length > 0
+      ? `Local RAG evidence:\n${input.retrievedContext.map((segment, index) => `Segment ${index + 1}:\n${segment}`).join("\n\n")}`
+      : "Local RAG evidence: none",
+    "Artifact content:",
+    "```text",
+    input.chunk,
+    "```",
+  ].join("\n\n");
+}
 
 function findSplitBoundary(source: string, start: number, end: number): number {
   const minimumPreferredIndex = start + Math.max(1, Math.floor((end - start) * 0.6));
@@ -103,6 +155,12 @@ function findSplitBoundary(source: string, start: number, end: number): number {
   }
 
   return end;
+}
+
+export function deriveChunkSizeBytes(modelContextSize: number): number {
+  const validatedContextSize = z.number().int().positive().parse(modelContextSize);
+  const derived = Math.floor(validatedContextSize * 0.9);
+  return Math.max(DEFAULT_CHUNK_SIZE_BYTES, derived);
 }
 
 export function chunkTextByBytes(source: string, maxBytes = DEFAULT_CHUNK_SIZE_BYTES): string[] {
@@ -169,13 +227,60 @@ function normalizeAiError(error: unknown): Error {
   return error;
 }
 
+export function buildAnalysisSnapshot(input: {
+  overview: string;
+  artifactSummaries?: Array<z.infer<typeof artifactSummarySchema>>;
+  chunkAnalyses?: Array<z.infer<typeof chunkAnalysisSchema>>;
+}): BundleAnalysis {
+  const artifactSummaries = input.artifactSummaries ?? [];
+  const chunkAnalyses = input.chunkAnalyses ?? [];
+
+  return finalAnalysisSchema.parse({
+    overview: input.overview,
+    entryPoints: deduplicate(
+      chunkAnalyses.flatMap((analysis) => analysis.entryPoints),
+      (entryPoint) => `${entryPoint.symbol}:${entryPoint.description}`,
+    ),
+    initializationFlow: deduplicate(
+      chunkAnalyses.flatMap((analysis) => analysis.initializationFlow),
+      (step) => step,
+    ),
+    callGraph: deduplicate(
+      chunkAnalyses.flatMap((analysis) => analysis.callGraph),
+      (edge) => `${edge.caller}->${edge.callee}`,
+    ),
+    restoredNames: deduplicate(
+      chunkAnalyses.flatMap((analysis) => analysis.restoredNames),
+      (entry) => `${entry.originalName}:${entry.suggestedName}`,
+    ),
+    notableLibraries: deduplicate(
+      chunkAnalyses.flatMap((analysis) => analysis.notableLibraries),
+      (library) => library,
+    ),
+    investigationTips: deduplicate(
+      chunkAnalyses.flatMap((analysis) => analysis.investigationTips),
+      (tip) => tip,
+    ),
+    risks: deduplicate(
+      chunkAnalyses.flatMap((analysis) => analysis.risks),
+      (risk) => risk,
+    ),
+    artifactSummaries,
+    analyzedChunkCount: chunkAnalyses.length,
+  });
+}
+
 export class AiBundleAnalyzer {
-  private readonly options: z.infer<typeof analyzerOptionsSchema>;
   private readonly providerClient: AiProviderClient;
+  private readonly chunkSizeBytes: number;
+  private readonly localRagEnabled: boolean;
+  private readonly onProgress: ((event: AnalysisProgressEvent) => void) | undefined;
 
   public constructor(options: AnalyzerOptions) {
-    this.options = analyzerOptionsSchema.parse(options);
-    this.providerClient = new AiProviderClient(this.options.providerConfig);
+    this.providerClient = new AiProviderClient(options.providerConfig);
+    this.chunkSizeBytes = options.chunkSizeBytes ?? deriveChunkSizeBytes(options.providerConfig.modelContextSize);
+    this.localRagEnabled = options.localRag ?? false;
+    this.onProgress = options.onProgress;
   }
 
   public async analyze(input: { pageUrl: string; artifacts: FormattedArtifact[] }): Promise<BundleAnalysis> {
@@ -196,25 +301,62 @@ export class AiBundleAnalyzer {
       });
     }
 
-    try {
-      const chunkAnalyses: Array<z.infer<typeof chunkAnalysisSchema>> = [];
-      const artifactSummaries: Array<z.infer<typeof artifactSummarySchema>> = [];
+    const chunkAnalyses: Array<z.infer<typeof chunkAnalysisSchema>> = [];
+    const artifactSummaries: Array<z.infer<typeof artifactSummarySchema>> = [];
 
-      for (const artifact of validatedInput.artifacts) {
-        const chunks = chunkTextByBytes(artifact.formattedContent || artifact.content, this.options.chunkSizeBytes);
+    try {
+      const localRag = this.localRagEnabled ? new LocalArtifactRag(validatedInput.artifacts) : null;
+
+      for (let artifactIndex = 0; artifactIndex < validatedInput.artifacts.length; artifactIndex += 1) {
+        const artifact = validatedInput.artifacts[artifactIndex]!;
+        const chunks = chunkTextByBytes(artifact.formattedContent || artifact.content, this.chunkSizeBytes);
         const perArtifactChunkAnalyses: Array<z.infer<typeof chunkAnalysisSchema>> = [];
 
+        this.emitProgress({
+          stage: "artifact",
+          state: "started",
+          message: `Starting swarm analysis for artifact ${artifactIndex + 1}/${validatedInput.artifacts.length}: ${artifact.url}`,
+          artifactIndex: artifactIndex + 1,
+          artifactCount: validatedInput.artifacts.length,
+          artifactUrl: artifact.url,
+        });
+
         for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-          const analysis = await this.analyzeChunk({
+          this.emitProgress({
+            stage: "chunk",
+            state: "started",
+            message: `Starting chunk ${chunkIndex + 1}/${chunks.length} for ${artifact.url}`,
+            artifactIndex: artifactIndex + 1,
+            artifactCount: validatedInput.artifacts.length,
+            artifactUrl: artifact.url,
+            chunkIndex: chunkIndex + 1,
+            chunkCount: chunks.length,
+          });
+
+          const analysis = await this.analyzeChunkWithSwarm({
             pageUrl: validatedInput.pageUrl,
             artifact,
             chunk: chunks[chunkIndex] ?? "",
             chunkIndex,
             totalChunks: chunks.length,
+            artifactIndex: artifactIndex + 1,
+            artifactCount: validatedInput.artifacts.length,
+            localRag,
           });
 
           chunkAnalyses.push(analysis);
           perArtifactChunkAnalyses.push(analysis);
+
+          this.emitProgress({
+            stage: "chunk",
+            state: "completed",
+            message: `Completed chunk ${chunkIndex + 1}/${chunks.length} for ${artifact.url}`,
+            artifactIndex: artifactIndex + 1,
+            artifactCount: validatedInput.artifacts.length,
+            artifactUrl: artifact.url,
+            chunkIndex: chunkIndex + 1,
+            chunkCount: chunks.length,
+          });
         }
 
         artifactSummaries.push({
@@ -223,40 +365,141 @@ export class AiBundleAnalyzer {
           chunkCount: chunks.length,
           summary: perArtifactChunkAnalyses.map((analysis) => analysis.summary).join(" "),
         });
+
+        this.emitProgress({
+          stage: "artifact",
+          state: "completed",
+          message: `Completed swarm analysis for artifact ${artifactIndex + 1}/${validatedInput.artifacts.length}: ${artifact.url}`,
+          artifactIndex: artifactIndex + 1,
+          artifactCount: validatedInput.artifacts.length,
+          artifactUrl: artifact.url,
+        });
       }
 
       return await this.summarizeFindings(validatedInput.pageUrl, artifactSummaries, chunkAnalyses);
     } catch (error) {
-      throw normalizeAiError(error);
+      const normalizedError = normalizeAiError(error);
+      const partialAnalysis = buildAnalysisSnapshot({
+        overview:
+          chunkAnalyses.length > 0 || artifactSummaries.length > 0
+            ? `Partial analysis only. Processing stopped because: ${normalizedError.message}`
+            : `Analysis aborted before any chunk completed. Cause: ${normalizedError.message}`,
+        artifactSummaries,
+        chunkAnalyses,
+      });
+
+      throw new PartialAnalysisError(normalizedError.message, partialAnalysis);
     }
   }
 
-  private async analyzeChunk(input: {
+  private async analyzeChunkWithSwarm(input: {
     pageUrl: string;
     artifact: FormattedArtifact;
     chunk: string;
     chunkIndex: number;
     totalChunks: number;
-  }) {
+    artifactIndex: number;
+    artifactCount: number;
+    localRag: LocalArtifactRag | null;
+  }): Promise<z.infer<typeof chunkAnalysisSchema>> {
+    const memory: Partial<Record<SwarmAgentName, z.infer<typeof agentMemoSchema> | z.infer<typeof chunkAnalysisSchema>>> = {};
+
+    for (const agent of SWARM_AGENT_ORDER) {
+      this.emitProgress({
+        stage: "agent",
+        state: "started",
+        message: `${agent} agent running on ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}`,
+        artifactIndex: input.artifactIndex,
+        artifactCount: input.artifactCount,
+        artifactUrl: input.artifact.url,
+        chunkIndex: input.chunkIndex + 1,
+        chunkCount: input.totalChunks,
+        agent,
+      });
+
+      if (agent === "synthesizer") {
+        const synthesized = await this.runSynthesisAgent(input, memory, this.getRetrievedContext(agent, input, memory));
+        memory[agent] = synthesized;
+      } else {
+        const memo = await this.runMemoAgent(agent, input, memory, this.getRetrievedContext(agent, input, memory));
+        memory[agent] = memo;
+      }
+
+      this.emitProgress({
+        stage: "agent",
+        state: "completed",
+        message: `${agent} agent completed ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}`,
+        artifactIndex: input.artifactIndex,
+        artifactCount: input.artifactCount,
+        artifactUrl: input.artifact.url,
+        chunkIndex: input.chunkIndex + 1,
+        chunkCount: input.totalChunks,
+        agent,
+      });
+    }
+
+    return chunkAnalysisSchema.parse(memory.synthesizer);
+  }
+
+  private async runMemoAgent(
+    agent: Exclude<SwarmAgentName, "synthesizer">,
+    input: {
+      pageUrl: string;
+      artifact: FormattedArtifact;
+      chunk: string;
+      chunkIndex: number;
+      totalChunks: number;
+    },
+    memory: Partial<Record<SwarmAgentName, unknown>>,
+    retrievedContext: string[],
+  ): Promise<z.infer<typeof agentMemoSchema>> {
     const result = await generateText({
       model: this.providerClient.getModel(),
-      system: [
-        "You are reverse-engineering website artifacts including JavaScript, HTML, CSS, service workers, and WASM summaries.",
-        "Return only structured output matching the schema.",
-        "Focus on concrete execution flow, runtime entry points, inter-artifact relationships, restored names, and operator tips.",
-      ].join(" "),
-      prompt: [
-        `Target page: ${input.pageUrl}`,
-        `Artifact URL: ${input.artifact.url}`,
-        `Artifact type: ${input.artifact.type}`,
-        `Discovered from: ${input.artifact.discoveredFrom}`,
-        `Chunk ${input.chunkIndex + 1} of ${input.totalChunks}`,
-        input.artifact.formattingNote ? `Formatting note: ${input.artifact.formattingNote}` : "Formatting note: none",
-        "Analyze the artifact content below.",
-        "```text",
-        input.chunk,
-        "```",
-      ].join("\n\n"),
+      system: getSwarmAgentPrompt(agent),
+      prompt: createPromptEnvelope({
+        pageUrl: input.pageUrl,
+        artifact: input.artifact,
+        chunk: input.chunk,
+        chunkIndex: input.chunkIndex,
+        totalChunks: input.totalChunks,
+        memory,
+        retrievedContext,
+      }),
+      output: Output.object({ schema: agentMemoSchema }),
+      maxRetries: 2,
+      providerOptions: {
+        openai: {
+          store: false,
+        },
+      },
+    });
+
+    return agentMemoSchema.parse(result.output);
+  }
+
+  private async runSynthesisAgent(
+    input: {
+      pageUrl: string;
+      artifact: FormattedArtifact;
+      chunk: string;
+      chunkIndex: number;
+      totalChunks: number;
+    },
+    memory: Partial<Record<SwarmAgentName, unknown>>,
+    retrievedContext: string[],
+  ): Promise<z.infer<typeof chunkAnalysisSchema>> {
+    const result = await generateText({
+      model: this.providerClient.getModel(),
+      system: getSwarmAgentPrompt("synthesizer"),
+      prompt: createPromptEnvelope({
+        pageUrl: input.pageUrl,
+        artifact: input.artifact,
+        chunk: input.chunk,
+        chunkIndex: input.chunkIndex,
+        totalChunks: input.totalChunks,
+        memory,
+        retrievedContext,
+      }),
       output: Output.object({ schema: chunkAnalysisSchema }),
       maxRetries: 2,
       providerOptions: {
@@ -278,9 +521,9 @@ export class AiBundleAnalyzer {
       const result = await generateText({
         model: this.providerClient.getModel(),
         system: [
-          "You are consolidating reverse-engineering analyses from multiple website artifacts.",
-          "Merge duplicates, produce a coherent site map, and include actionable investigation tips.",
-          "Return only structured output matching the schema.",
+          getGlobalMissionPrompt(),
+          "You are the lead synthesis agent for the final report.",
+          "Merge artifact summaries and chunk analyses into a coherent site-level reverse-engineering map with the strongest evidence available.",
         ].join(" "),
         prompt: [
           `Target page: ${pageUrl}`,
@@ -309,39 +552,47 @@ export class AiBundleAnalyzer {
         analyzedChunkCount: chunkAnalyses.length,
       });
     } catch {
-      return finalAnalysisSchema.parse({
+      return buildAnalysisSnapshot({
         overview: artifactSummaries.map((summary) => summary.summary).join(" ").trim() || "Artifact analysis completed.",
-        entryPoints: deduplicate(
-          chunkAnalyses.flatMap((analysis) => analysis.entryPoints),
-          (entryPoint) => `${entryPoint.symbol}:${entryPoint.description}`,
-        ),
-        initializationFlow: deduplicate(
-          chunkAnalyses.flatMap((analysis) => analysis.initializationFlow),
-          (step) => step,
-        ),
-        callGraph: deduplicate(
-          chunkAnalyses.flatMap((analysis) => analysis.callGraph),
-          (edge) => `${edge.caller}->${edge.callee}`,
-        ),
-        restoredNames: deduplicate(
-          chunkAnalyses.flatMap((analysis) => analysis.restoredNames),
-          (entry) => `${entry.originalName}:${entry.suggestedName}`,
-        ),
-        notableLibraries: deduplicate(
-          chunkAnalyses.flatMap((analysis) => analysis.notableLibraries),
-          (library) => library,
-        ),
-        investigationTips: deduplicate(
-          chunkAnalyses.flatMap((analysis) => analysis.investigationTips),
-          (tip) => tip,
-        ),
-        risks: deduplicate(
-          chunkAnalyses.flatMap((analysis) => analysis.risks),
-          (risk) => risk,
-        ),
         artifactSummaries,
-        analyzedChunkCount: chunkAnalyses.length,
+        chunkAnalyses,
       });
     }
+  }
+
+  private emitProgress(event: AnalysisProgressEvent): void {
+    this.onProgress?.(event);
+  }
+
+  private getRetrievedContext(
+    agent: SwarmAgentName,
+    input: {
+      artifact: FormattedArtifact;
+      chunk: string;
+      localRag: LocalArtifactRag | null;
+    },
+    memory: Partial<Record<SwarmAgentName, unknown>>,
+  ): string[] {
+    if (!input.localRag) {
+      return [];
+    }
+
+    const agentKeywords: Record<SwarmAgentName, string> = {
+      scout: "imports exports framework runtime mount hydrate render boot start worker register fetch cache dom route manifest css wasm",
+      runtime: "entry init bootstrap mount hydrate listener event lifecycle schedule render message postMessage fetch call graph trigger",
+      naming: "function class variable module store client request response state cache token auth session api route handler service",
+      security: "auth token session cookie localStorage sessionStorage indexedDB cache service worker telemetry endpoint wasm trust dynamic import",
+      synthesizer: "entry points call graph restored names investigation tips risks runtime relationships architecture summary",
+    };
+
+    const memoryText = Object.values(memory)
+      .map((entry) => JSON.stringify(entry))
+      .join(" ");
+
+    return input.localRag.query({
+      artifactUrl: input.artifact.url,
+      query: `${agentKeywords[agent]} ${input.chunk} ${memoryText}`.slice(0, 6000),
+      excludeContent: input.chunk,
+    });
   }
 }

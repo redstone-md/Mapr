@@ -10,6 +10,7 @@ describe("AiProviderClient", () => {
       apiKey: "secret",
       baseURL: "http://localhost:8000/v1",
       model: "unused",
+      modelContextSize: 128000,
     });
 
     const calls: string[] = [];

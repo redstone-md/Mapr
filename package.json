@@ -1,15 +1,49 @@
 {
   "name": "mapr",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.3.0",
   "type": "module",
-  "description": "Bun-native CLI/TUI for reverse-engineering frontend JavaScript bundles",
+  "description": "Bun-native CLI/TUI for reverse-engineering frontend websites, bundles, WASM, and service workers",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/redstone-md/Mapr.git"
+  },
+  "homepage": "https://github.com/redstone-md/Mapr",
+  "bugs": {
+    "url": "https://github.com/redstone-md/Mapr/issues"
+  },
+  "keywords": [
+    "bun",
+    "cli",
+    "tui",
+    "reverse-engineering",
+    "javascript",
+    "frontend",
+    "wasm",
+    "service-worker",
+    "ai"
+  ],
   "engines": {
     "bun": ">=1.3.9"
   },
+  "bin": {
+    "mapr": "./bin/mapr"
+  },
+  "files": [
+    "bin",
+    "index.ts",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "start": "bun run index.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "check": "bunx tsc --noEmit",
+    "prepublishOnly": "bun test && bunx tsc --noEmit"
   },
   "dependencies": {
     "@ai-sdk/openai": "3.0.41",
