@@ -18,6 +18,7 @@ export interface AnalysisProgressLineInput {
   agent: string;
   state: "started" | "streaming" | "completed";
   artifactUrl: string;
+  lane?: number;
   chunkIndex?: number;
   chunkCount?: number;
   estimatedOutputTokens?: number;
@@ -112,6 +113,10 @@ function formatChunkLabel(chunkIndex: number | undefined, chunkCount: number | u
   return ` chunk ${chunkIndex}/${chunkCount}`;
 }
 
+function formatLaneLabel(lane: number | undefined): string {
+  return lane !== undefined ? `lane ${lane} ` : "";
+}
+
 function formatTelemetrySuffix(input: AnalysisProgressLineInput): string {
   const tokenCount = input.outputTokens ?? input.estimatedOutputTokens;
   if (tokenCount === undefined) {
@@ -126,7 +131,7 @@ function formatTelemetrySuffix(input: AnalysisProgressLineInput): string {
 export function renderAdaptiveAnalysisProgressLine(input: AnalysisProgressLineInput): string {
   const terminalWidth = Math.max(80, input.terminalWidth ?? process.stdout.columns ?? 120);
   const progressBar = renderProgressBar(input.completed, input.total, computeProgressBarWidth(terminalWidth));
-  const prefix = `${progressBar} ${input.agent} agent ${formatAgentState(input.state)} `;
+  const prefix = `${progressBar} ${formatLaneLabel(input.lane)}${input.agent} agent ${formatAgentState(input.state)} `;
   const etaMs = estimateRemainingMs(input.completed, input.total, input.elapsedMs);
   const suffixCandidates = [
     `${formatChunkLabel(input.chunkIndex, input.chunkCount)}${formatTelemetrySuffix(input)}${
@@ -151,4 +156,16 @@ export function renderAdaptiveAnalysisProgressLine(input: AnalysisProgressLineIn
   }
 
   return `${prefix}${middleTruncate(input.artifactUrl, 8)}`;
+}
+
+export function renderAgentLogLine(input: AnalysisProgressLineInput): string {
+  const prefix = `${formatLaneLabel(input.lane)}${input.agent} ${formatAgentState(input.state)}`;
+  const chunk = formatChunkLabel(input.chunkIndex, input.chunkCount);
+  const telemetry = formatTelemetrySuffix(input);
+  const etaMs = estimateRemainingMs(input.completed, input.total, input.elapsedMs);
+  const eta = etaMs !== undefined ? ` eta ${formatDuration(etaMs)}` : "";
+  const terminalWidth = Math.max(80, input.terminalWidth ?? process.stdout.columns ?? 120);
+  const available = terminalWidth - prefix.length - chunk.length - telemetry.length - eta.length - 4;
+  const url = middleTruncate(input.artifactUrl, Math.max(18, available));
+  return `${prefix} ${url}${chunk}${telemetry}${eta}`;
 }

@@ -8,7 +8,7 @@ const rawCliArgsSchema = z.object({
   headless: z.boolean().default(false),
   reconfigure: z.boolean().default(false),
   listModels: z.boolean().default(false),
-  localRag: z.boolean().default(false),
+  localRag: z.boolean().optional(),
   verboseAgents: z.boolean().default(false),
   url: z.string().url().optional(),
   output: z.string().min(1).optional(),
@@ -74,6 +74,7 @@ const optionMap = new Map<string, keyof CliArgs>([
   ["--max-depth", "maxDepth"],
 ]);
 
+const booleanFalseOptionMap = new Map<string, keyof CliArgs>([["--no-local-rag", "localRag"]]);
 const booleanKeys = new Set<keyof CliArgs>(["help", "version", "headless", "reconfigure", "listModels", "localRag", "verboseAgents"]);
 const numberKeys = new Set<keyof CliArgs>(["contextSize", "analysisConcurrency", "maxPages", "maxArtifacts", "maxDepth"]);
 
@@ -99,6 +100,15 @@ export function parseCliArgs(argv: string[]): CliArgs {
 
     const [rawKey, rawInlineValue] = token.includes("=") ? token.split(/=(.*)/s, 2) : [token, undefined];
     const mappedKey = optionMap.get(rawKey);
+    if (!mappedKey && !booleanFalseOptionMap.has(rawKey)) {
+      throw new Error(`Unknown argument: ${rawKey}`);
+    }
+
+    if (booleanFalseOptionMap.has(rawKey)) {
+      accumulator[booleanFalseOptionMap.get(rawKey)!] = false;
+      continue;
+    }
+
     if (!mappedKey) {
       throw new Error(`Unknown argument: ${rawKey}`);
     }
@@ -174,6 +184,7 @@ export function renderHelpText(): string {
     "  --analysis-concurrency <n>      Parallel chunk analyses per artifact",
     "  --list-models                   Fetch and print models using the resolved provider config",
     "  --local-rag                     Enable local lexical RAG for oversized artifacts",
+    "  --no-local-rag                  Disable local lexical RAG explicitly",
     "  --reconfigure                   Force interactive provider reconfiguration",
     "",
     "Output and diagnostics:",

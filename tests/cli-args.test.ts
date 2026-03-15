@@ -48,6 +48,11 @@ describe("parseCliArgs", () => {
     expect(args.maxDepth).toBe(4);
   });
 
+  test("supports explicit local rag disable", () => {
+    const args = parseCliArgs(["--no-local-rag"]);
+    expect(args.localRag).toBe(false);
+  });
+
   test("builds config overrides without undefined fields", () => {
     const overrides = getConfigOverrides(
       parseCliArgs([

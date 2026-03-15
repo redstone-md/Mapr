@@ -4,16 +4,20 @@ import { cancel, confirm, intro, isCancel, log, outro, select, spinner, text } f
 import pc from "picocolors";
 import packageJson from "./package.json";
 
+import { ApiSurfaceDiscoverer } from "./lib/api-discovery";
 import { estimateAgentTaskCount } from "./lib/analysis-planner";
 import { buildAnalysisSnapshot, PartialAnalysisError } from "./lib/analysis-schema";
 import { AiBundleAnalyzer, chunkTextByBytes, deriveChunkSizeBytes } from "./lib/ai-analyzer";
 import { getConfigOverrides, parseCliArgs, renderHelpText } from "./lib/cli-args";
 import { ConfigManager } from "./lib/config";
+import { FlowSurfaceDiscoverer } from "./lib/flow-discovery";
 import { BundleFormatter } from "./lib/formatter";
-import { renderAdaptiveAnalysisProgressLine, renderProgressBar } from "./lib/progress";
+import { LocalArtifactRag } from "./lib/local-rag";
+import { renderAdaptiveAnalysisProgressLine, renderAgentLogLine, renderProgressBar } from "./lib/progress";
 import { findKnownModelInfo, isCodexModel } from "./lib/provider";
-import { ReportWriter } from "./lib/reporter";
+import { RunArtifactsWriter } from "./lib/run-output";
 import { BundleScraper } from "./lib/scraper";
+import { mergeDeterministicSurface } from "./lib/surface-analysis";
 
 process.env.AI_SDK_LOG_WARNINGS = "false";
 (globalThis as typeof globalThis & { AI_SDK_LOG_WARNINGS?: boolean }).AI_SDK_LOG_WARNINGS = false;
@@ -90,6 +94,27 @@ async function resolveAnalysisConcurrency(headless: boolean, prefilledValue: num
   );
 }
 
+async function resolveLocalRag(headless: boolean, prefilledValue: boolean | undefined, totalBytes: number): Promise<boolean> {
+  if (prefilledValue !== undefined) {
+    return prefilledValue;
+  }
+
+  if (headless) {
+    return false;
+  }
+
+  return Boolean(
+    exitIfCancelled(
+      await confirm({
+        message: "Enable local RAG code indexing?",
+        active: "Enable",
+        inactive: "Skip",
+        initialValue: totalBytes >= 2_000_000,
+      }),
+    ),
+  );
+}
+
 async function run(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
 
@@ -106,6 +131,8 @@ async function run(): Promise<void> {
   const headless = args.headless;
   if (!headless) {
     intro(`${pc.bgCyan(pc.black(" mapr "))} ${pc.bold("Website reverse-engineering for Bun")}`);
+    log.info(`Repository: ${pc.underline("https://github.com/redstone-md/Mapr")}`);
+    log.warn("Disclaimer: the author and contributors assume no liability for how this analysis is used.");
   }
 
   const configManager = new ConfigManager();
@@ -175,7 +202,33 @@ async function run(): Promise<void> {
       sum + chunkTextByBytes(artifact.formattedContent || artifact.content, deriveChunkSizeBytes(config.modelContextSize)).length,
     0,
   );
+  const totalArtifactBytes = formattedArtifacts.reduce((sum, artifact) => sum + artifact.sizeBytes, 0);
+  const localRagEnabled = await resolveLocalRag(headless, args.localRag, totalArtifactBytes);
   const analysisConcurrency = await resolveAnalysisConcurrency(headless, args.analysisConcurrency, totalChunks);
+  const ragSummary = localRagEnabled ? new LocalArtifactRag(formattedArtifacts).describe() : undefined;
+
+  const discoveryStep = spinner({ indicator: "timer" });
+  discoveryStep.start("Extracting API, auth, captcha, fingerprinting, and encryption surface");
+  const apiDiscoverer = new ApiSurfaceDiscoverer({
+    onProgress(message) {
+      discoveryStep.message(message);
+    },
+  });
+  const apiSurface = await apiDiscoverer.discover(scrapeResult.pageUrl, formattedArtifacts);
+  const flowDiscoverer = new FlowSurfaceDiscoverer();
+  const deterministicSurface = mergeDeterministicSurface({
+    ...apiSurface,
+    ...flowDiscoverer.discover({
+      domSnapshots: scrapeResult.domSnapshots,
+      artifacts: formattedArtifacts,
+      apiEndpoints: apiSurface.apiEndpoints,
+      graphQlEndpoints: apiSurface.graphQlEndpoints,
+    }),
+  });
+  discoveryStep.stop(
+    `Mapped ${deterministicSurface.apiEndpoints.length} API endpoint(s), ${deterministicSurface.authFlows.length} auth flow(s), ${deterministicSurface.captchaFlows.length} captcha flow(s)`,
+  );
+
   const totalAgentTasks = estimateAgentTaskCount(
     scrapeResult.pageUrl,
     formattedArtifacts,
@@ -189,7 +242,7 @@ async function run(): Promise<void> {
 
   const analyzer = new AiBundleAnalyzer({
     providerConfig: config,
-    localRag: args.localRag,
+    localRag: localRagEnabled,
     analysisConcurrency,
     onProgress(event) {
       if (event.stage === "agent" && event.state === "completed") {
@@ -205,6 +258,7 @@ async function run(): Promise<void> {
               agent: event.agent,
               state: event.state,
               artifactUrl: event.artifactUrl,
+              ...(event.lane !== undefined ? { lane: event.lane } : {}),
               ...(event.chunkIndex !== undefined ? { chunkIndex: event.chunkIndex } : {}),
               ...(event.chunkCount !== undefined ? { chunkCount: event.chunkCount } : {}),
               ...(event.estimatedOutputTokens !== undefined
@@ -216,8 +270,25 @@ async function run(): Promise<void> {
           : formatAnalysisProgress(completedAgentTasks, totalAgentTasks, event.message);
       analysisStep.message(progressLine);
 
-      if (args.verboseAgents && event.stage === "agent" && event.state === "completed") {
-        log.step(progressLine);
+      if (event.stage === "agent" && event.state !== "streaming" && (args.verboseAgents || analysisConcurrency > 1)) {
+        log.step(
+          renderAgentLogLine({
+            completed: completedAgentTasks,
+            total: totalAgentTasks,
+            elapsedMs: Date.now() - analysisStartedAt,
+            agent: event.agent ?? "scout",
+            state: event.state,
+            artifactUrl: event.artifactUrl,
+            ...(event.lane !== undefined ? { lane: event.lane } : {}),
+            ...(event.chunkIndex !== undefined ? { chunkIndex: event.chunkIndex } : {}),
+            ...(event.chunkCount !== undefined ? { chunkCount: event.chunkCount } : {}),
+            ...(event.estimatedOutputTokens !== undefined
+              ? { estimatedOutputTokens: event.estimatedOutputTokens }
+              : {}),
+            ...(event.outputTokens !== undefined ? { outputTokens: event.outputTokens } : {}),
+            ...(event.tokensPerSecond !== undefined ? { tokensPerSecond: event.tokensPerSecond } : {}),
+          }),
+        );
       }
     },
   });
@@ -230,6 +301,7 @@ async function run(): Promise<void> {
         pageUrl: scrapeResult.pageUrl,
         domSnapshots: scrapeResult.domSnapshots,
         artifacts: formattedArtifacts,
+        deterministicSurface,
       });
 
       analysisStep.stop(
@@ -258,9 +330,9 @@ async function run(): Promise<void> {
   const reportStatus: "complete" | "partial" = partialReport ? "partial" : "complete";
 
   const reportStep = spinner({ indicator: "timer" });
-  reportStep.start(reportStatus === "partial" ? "Writing partial Markdown report after analysis error" : "Generating Markdown report");
-  const reportWriter = new ReportWriter();
-  const reportPath = await reportWriter.writeReport({
+  reportStep.start(reportStatus === "partial" ? "Writing partial run artifacts after analysis error" : "Generating run artifacts");
+  const runWriter = new RunArtifactsWriter();
+  const { reportPath, runDirectory } = await runWriter.writeRun({
     targetUrl: scrapeResult.pageUrl,
     htmlPages: scrapeResult.htmlPages,
     domSnapshots: scrapeResult.domSnapshots,
@@ -268,9 +340,24 @@ async function run(): Promise<void> {
     ...(analysisError !== undefined ? { analysisError } : {}),
     artifacts: formattedArtifacts,
     analysis,
+    deterministicSurface,
+    runMetadata: {
+      targetUrl: scrapeResult.pageUrl,
+      providerName: config.providerName,
+      model: config.model,
+      contextSize: config.modelContextSize,
+      analysisConcurrency,
+      localRagEnabled,
+      ragSummary,
+      counts: {
+        htmlPages: scrapeResult.htmlPages.length,
+        artifacts: formattedArtifacts.length,
+        chunks: analysis.analyzedChunkCount,
+      },
+    },
     ...(args.output !== undefined ? { outputPathOverride: args.output } : {}),
   });
-  reportStep.stop(reportStatus === "partial" ? "Partial report written to disk" : "Report written to disk");
+  reportStep.stop(reportStatus === "partial" ? "Partial run artifacts written to disk" : "Run artifacts written to disk");
 
   const selectedModelInfo = findKnownModelInfo(config.model);
   const summaryLines = [
@@ -283,12 +370,22 @@ async function run(): Promise<void> {
     ...(config.openAiMode !== undefined ? [`${pc.bold("OpenAI mode:")} ${config.openAiMode}`] : []),
     ...(isCodexModel(config.model) && selectedModelInfo?.usageLimitsNote ? [`${pc.bold("Codex limits:")} ${selectedModelInfo.usageLimitsNote}`] : []),
     `${pc.bold("Concurrency:")} ${analysisConcurrency}`,
-    `${pc.bold("Local RAG:")} ${args.localRag ? "enabled" : "disabled"}`,
+    `${pc.bold("Local RAG:")} ${localRagEnabled ? "enabled" : "disabled"}`,
+    ...(ragSummary !== undefined ? [`${pc.bold("RAG segments:")} ${ragSummary.segmentCount}`] : []),
     `${pc.bold("Pages:")} ${scrapeResult.htmlPages.length}`,
     `${pc.bold("Artifacts:")} ${formattedArtifacts.length}`,
     `${pc.bold("Chunks analyzed:")} ${analysis.analyzedChunkCount}`,
+    `${pc.bold("REST endpoints:")} ${deterministicSurface.apiEndpoints.length}`,
+    `${pc.bold("GraphQL endpoints:")} ${deterministicSurface.graphQlEndpoints.length}`,
+    `${pc.bold("Auth flows:")} ${deterministicSurface.authFlows.length}`,
+    `${pc.bold("Captcha flows:")} ${deterministicSurface.captchaFlows.length}`,
+    `${pc.bold("Fingerprinting signals:")} ${deterministicSurface.fingerprintingSignals.length}`,
+    `${pc.bold("Encryption signals:")} ${deterministicSurface.encryptionSignals.length}`,
     ...(analysisError !== undefined ? [`${pc.bold("Analysis error:")} ${analysisError}`] : []),
+    `${pc.bold("Repo:")} ${pc.underline("https://github.com/redstone-md/Mapr")}`,
+    `${pc.bold("Artifacts dir:")} ${pc.underline(runDirectory)}`,
     `${pc.bold("Report:")} ${pc.underline(reportPath)}`,
+    `${pc.bold("Disclaimer:")} Author and contributors assume no liability.`,
   ].join("\n");
 
   if (headless) {

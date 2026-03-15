@@ -2,7 +2,7 @@
 
 ![Mapr banner](./assets/banner.svg)
 
-Mapr is a Bun-native CLI/TUI for reverse-engineering frontend websites and build outputs. It crawls a target site, collects analyzable frontend artifacts, runs a multi-agent AI analysis pipeline over chunked code, and writes a Markdown report with entry points, initialization flow, inferred call graph edges, restored names, artifact summaries, and investigation tips.
+Mapr is a Bun-native CLI/TUI for reverse-engineering frontend websites and build outputs. It crawls a target site, collects analyzable frontend artifacts, runs a multi-agent AI analysis pipeline over chunked code, and writes a run directory with a Markdown report, artifact dumps, API/auth/captcha/fingerprinting/encryption findings, and investigation notes.
 
 This repository is public for source visibility and collaboration. The license remains source-available and restricted. Read the contribution and license sections before reusing or contributing to the codebase.
 
@@ -17,6 +17,7 @@ This repository is public for source visibility and collaboration. The license r
 - Same-origin crawler with bounded page count and crawl depth
 - JS bundle, worker, service worker, WASM, and source-map discovery
 - Iframe-aware crawling for same-origin embedded pages
+- Deterministic extraction of REST, Swagger/OpenAPI, GraphQL, auth, captcha, fingerprinting, and encryption surface
 - Streaming AI generation with live throughput updates in the TUI
 - Local RAG mode for multi-megabyte bundles
 - Partial-report persistence when analysis fails mid-run
@@ -69,7 +70,7 @@ npx @redstone-md/mapr --help
 5. Format analyzable content where possible
 6. Optionally build a local lexical RAG index for oversized artifacts
 7. Run a communicating swarm of analysis agents over chunked artifact content through streaming JSON generation so long-running requests keep producing output
-8. Generate a Markdown report in the current working directory
+8. Generate a run directory containing the Markdown report, metadata, DOM snapshots, deterministic findings, and raw/formatted artifacts
 
 ## Provider Presets
 
@@ -155,13 +156,23 @@ Progress is shown directly in the TUI for crawler fetches, depth skips, discover
 
 ## Output
 
-Each run writes a Markdown file named like:
+Each run writes a directory named like:
 
 ```text
-report-example.com-2026-03-15T12-34-56-789Z.md
+mapr-run-example.com-2026-03-15T12-34-56-789Z
 ```
 
-If analysis fails after artifact discovery or formatting has already completed, Mapr still writes a partial report and includes the analysis error in the document.
+The run directory contains:
+
+- `report.md`
+- `README.md`
+- `metadata.json`
+- `dom-snapshots.json`
+- `deterministic-surface.json`
+- `artifacts/raw/*`
+- `artifacts/formatted/*`
+
+If analysis fails after artifact discovery or formatting has already completed, Mapr still writes a partial run directory and includes the analysis error in the report.
 
 ## Limitations
 

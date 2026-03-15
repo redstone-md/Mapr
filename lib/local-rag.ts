@@ -16,6 +16,12 @@ interface RagSegment {
   tokenWeights: Map<string, number>;
 }
 
+export interface LocalRagSummary {
+  artifactCount: number;
+  segmentCount: number;
+  segmentsPerArtifact: Array<{ artifactUrl: string; segmentCount: number }>;
+}
+
 function tokenize(source: string): string[] {
   return (source.toLowerCase().match(tokenPattern) ?? []).slice(0, 4000);
 }
@@ -100,5 +106,18 @@ export class LocalArtifactRag {
       .sort((left, right) => right.score - left.score || left.segmentIndex - right.segmentIndex)
       .slice(0, this.options.maxResults)
       .map((entry) => entry.content);
+  }
+
+  public describe(): LocalRagSummary {
+    const segmentsPerArtifact = [...this.segmentsByArtifact.entries()].map(([artifactUrl, segments]) => ({
+      artifactUrl,
+      segmentCount: segments.length,
+    }));
+
+    return {
+      artifactCount: segmentsPerArtifact.length,
+      segmentCount: segmentsPerArtifact.reduce((sum, entry) => sum + entry.segmentCount, 0),
+      segmentsPerArtifact,
+    };
   }
 }
