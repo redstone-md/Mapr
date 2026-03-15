@@ -220,6 +220,7 @@ describe("BundleScraper", () => {
               <body>
                 <a href="/dashboard">Dashboard</a>
                 <a href="/signup.html">Signup</a>
+                <form action="/search_result.html"></form>
                 <iframe src="/embedded/login-frame.html"></iframe>
               </body>
             </html>
@@ -270,6 +271,7 @@ describe("BundleScraper", () => {
     expect(fetchLog).not.toContain("https://example.com/sitemap.xml");
     expect(fetchLog).not.toContain("https://example.com/dashboard");
     expect(fetchLog).not.toContain("https://example.com/signup.html");
+    expect(fetchLog).not.toContain("https://example.com/search_result.html");
     expect(fetchLog).toContain("https://example.com/embedded/login-frame.html");
     expect(result.htmlPages.sort()).toEqual(
       ["https://example.com/login.html", "https://example.com/embedded/login-frame.html"].sort(),
