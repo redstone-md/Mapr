@@ -6,6 +6,7 @@ import type { BundleAnalysis } from "./analysis-schema";
 import { artifactTypeSchema } from "./artifacts";
 import { domPageSnapshotSchema, type DomPageSnapshot } from "./dom-snapshot";
 import type { FormattedArtifact } from "./formatter";
+import { deterministicSurfaceSchema, EMPTY_DETERMINISTIC_SURFACE, type DeterministicSurface } from "./surface-analysis";
 
 const reportInputSchema = z.object({
   targetUrl: z.string().url(),
@@ -62,9 +63,10 @@ const reportInputSchema = z.object({
     ),
     analyzedChunkCount: z.number().int().nonnegative(),
   }),
+  deterministicSurface: deterministicSurfaceSchema.default(EMPTY_DETERMINISTIC_SURFACE),
 });
 
-type ReportInput = z.infer<typeof reportInputSchema>;
+type ReportInput = z.input<typeof reportInputSchema>;
 
 function formatBulletList(items: string[], emptyState: string): string {
   return items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : `- ${emptyState}`;
@@ -113,6 +115,131 @@ function formatDomSnapshots(domSnapshots: DomPageSnapshot[]): string {
     .join("\n");
 }
 
+function formatDeterministicSurface(surface: DeterministicSurface): string[] {
+  const apiEndpoints =
+    surface.apiEndpoints.length > 0
+      ? surface.apiEndpoints
+          .map(
+            (endpoint) =>
+              `- \`${endpoint.url}\`${endpoint.methods.length > 0 ? ` [${endpoint.methods.join(", ")}]` : ""}: ${endpoint.purpose}. Request fields: ${
+                endpoint.requestFields.join(", ") || "none inferred"
+              }.`,
+          )
+          .join("\n")
+      : "- No REST-like endpoints were extracted.";
+  const openApiDocs =
+    surface.openApiDocuments.length > 0
+      ? surface.openApiDocuments
+          .map(
+            (document) =>
+              `- ${document.url}${document.title ? ` (${document.title})` : ""}: ${document.pathSummaries.slice(0, 5).join("; ") || "No path summaries parsed."}`,
+          )
+          .join("\n")
+      : "- No OpenAPI or Swagger documents were discovered.";
+  const graphQl =
+    surface.graphQlEndpoints.length > 0 || surface.graphQlOperations.length > 0
+      ? [
+          ...surface.graphQlEndpoints.map(
+            (endpoint) =>
+              `- Endpoint ${endpoint.url}: introspection ${endpoint.introspectionStatus}; schema hints: ${
+                endpoint.sampleFields.join(", ") || "none"
+              }`,
+          ),
+          ...surface.graphQlOperations.map(
+            (operation) =>
+              `- ${operation.operationType} ${operation.operationName} via ${operation.endpointUrl}: variables ${
+                operation.variables.join(", ") || "none"
+              }; expected response ${operation.expectedResponse}`,
+          ),
+        ].join("\n")
+      : "- No GraphQL surface was extracted.";
+  const authFlows =
+    surface.authFlows.length > 0
+      ? surface.authFlows
+          .map(
+            (flow) =>
+              `- ${flow.title}: triggers ${flow.triggers.join(", ") || "none"}; tokens ${
+                flow.tokens.join(", ") || "none"
+              }; errors ${flow.errors.join(", ") || "none"}`,
+          )
+          .join("\n")
+      : "- No auth flow was reconstructed.";
+  const captchaFlows =
+    surface.captchaFlows.length > 0
+      ? surface.captchaFlows
+          .map(
+            (flow) =>
+              `- ${flow.provider}: triggers ${flow.triggers.join(", ") || "none"}; endpoints ${
+                flow.endpoints.join(", ") || "none"
+              }; errors ${flow.errors.join(", ") || "none"}`,
+          )
+          .join("\n")
+      : "- No captcha flow was reconstructed.";
+  const fingerprinting =
+    surface.fingerprintingSignals.length > 0
+      ? surface.fingerprintingSignals
+          .map(
+            (signal) =>
+              `- ${signal.collector}: collects ${signal.dataPoints.join(", ") || "unspecified traits"}; destinations ${
+                signal.destinationUrls.join(", ") || "none inferred"
+              }`,
+          )
+          .join("\n")
+      : "- No fingerprinting logic was detected.";
+  const encryption =
+    surface.encryptionSignals.length > 0
+      ? surface.encryptionSignals
+          .map(
+            (signal) =>
+              `- Algorithms ${signal.algorithmHints.join(", ") || "unknown"}; inputs ${
+                signal.inputs.join(", ") || "none"
+              }; outputs ${signal.outputs.join(", ") || "none"}; destinations ${signal.destinationUrls.join(", ") || "none inferred"}`,
+          )
+          .join("\n")
+      : "- No client-side encryption or signing hints were detected.";
+  const findings =
+    surface.securityFindings.length > 0
+      ? surface.securityFindings
+          .map((finding) => `- [${finding.severity}] ${finding.title}: ${finding.detail} Remediation: ${finding.remediation}`)
+          .join("\n")
+      : "- No deterministic security findings were derived.";
+
+  return [
+    "## API Surface",
+    "",
+    apiEndpoints,
+    "",
+    "## OpenAPI And Swagger",
+    "",
+    openApiDocs,
+    "",
+    "## GraphQL Surface",
+    "",
+    graphQl,
+    "",
+    "## Authentication Flow",
+    "",
+    authFlows,
+    "",
+    "## Captcha And Challenge Flow",
+    "",
+    captchaFlows,
+    "",
+    "## Fingerprinting Surface",
+    "",
+    fingerprinting,
+    "",
+    "## Encryption And Signing Surface",
+    "",
+    encryption,
+    "",
+    "## Deterministic Security Findings",
+    "",
+    findings,
+    "",
+  ];
+}
+
 export class ReportWriter {
   public generateMarkdown(input: ReportInput): string {
     const report = reportInputSchema.parse(input);
@@ -151,6 +278,8 @@ export class ReportWriter {
     return [
       "# Mapr Reverse-Engineering Report",
       "",
+      "- Repository: https://github.com/redstone-md/Mapr",
+      "- Disclaimer: The author and contributors assume no liability for how this analysis is used.",
       `- Target URL: ${report.targetUrl}`,
       `- Generated: ${new Date().toISOString()}`,
       `- Report status: ${report.reportStatus}`,
@@ -169,6 +298,7 @@ export class ReportWriter {
       "",
       formatDomSnapshots(report.domSnapshots),
       "",
+      ...formatDeterministicSurface(report.deterministicSurface),
       "## Executive Summary",
       "",
       report.analysis.overview,
@@ -221,6 +351,7 @@ export class ReportWriter {
     analysisError?: string;
     artifacts: FormattedArtifact[];
     analysis: BundleAnalysis;
+    deterministicSurface: DeterministicSurface;
     outputPathOverride?: string;
   }): Promise<string> {
     const { outputPathOverride, ...reportInput } = input;

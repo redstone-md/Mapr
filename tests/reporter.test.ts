@@ -55,11 +55,51 @@ describe("ReportWriter", () => {
         artifactSummaries: [],
         analyzedChunkCount: 0,
       },
+      deterministicSurface: {
+        apiEndpoints: [
+          {
+            url: "https://example.com/api/login",
+            methods: ["POST"],
+            sourceArtifactUrl: "https://example.com/assets/app.js",
+            purpose: "Likely auth/session endpoint",
+            requestFields: ["email", "password"],
+            responseFields: [],
+            evidence: ["fetch('/api/login', ...)"],
+          },
+        ],
+        openApiDocuments: [],
+        graphQlEndpoints: [],
+        graphQlOperations: [],
+        authFlows: [
+          {
+            title: "Primary authentication flow",
+            triggers: ["Sign in"],
+            steps: [],
+            tokens: ["cookie"],
+            errors: ["invalid password"],
+            evidence: ["https://example.com/login"],
+          },
+        ],
+        captchaFlows: [],
+        fingerprintingSignals: [],
+        encryptionSignals: [],
+        securityFindings: [
+          {
+            severity: "low",
+            title: "Example finding",
+            detail: "Example detail",
+            remediation: "Review implementation.",
+            evidence: ["https://example.com/api/login"],
+          },
+        ],
+      },
     });
 
     expect(markdown).toContain("Report status: partial");
     expect(markdown).toContain("Analysis ended early: Provider rate limit hit during analysis.");
     expect(markdown).toContain("## DOM Surface");
+    expect(markdown).toContain("## API Surface");
+    expect(markdown).toContain("## Authentication Flow");
     expect(markdown).toContain("forms: POST https://example.com/login [email, password]");
   });
 });

@@ -24,6 +24,7 @@ import type { FormattedArtifact } from "./formatter";
 import { LocalArtifactRag } from "./local-rag";
 import { mapWithConcurrency } from "./promise-pool";
 import { AiProviderClient, type AiProviderConfig } from "./provider";
+import type { DeterministicSurface } from "./surface-analysis";
 import { getGlobalMissionPrompt, getSwarmAgentPrompt, type SwarmAgentName } from "./swarm-prompts";
 
 const analyzeInputSchema = z.object({
@@ -56,6 +57,7 @@ export interface AnalysisProgressEvent {
   chunkIndex?: number;
   chunkCount?: number;
   agent?: SwarmAgentName;
+  lane?: number;
   estimatedOutputTokens?: number;
   outputTokens?: number;
   tokensPerSecond?: number;
@@ -79,6 +81,7 @@ interface ChunkTaskInput {
   artifactCount: number;
   localRag: LocalArtifactRag | null;
   artifactPrimer?: string;
+  lane: number;
 }
 
 export { chunkTextByBytes, deriveChunkSizeBytes } from "./analysis-helpers";
@@ -100,7 +103,12 @@ export class AiBundleAnalyzer {
     this.onProgress = options.onProgress;
   }
 
-  public async analyze(input: { pageUrl: string; domSnapshots?: DomPageSnapshot[]; artifacts: FormattedArtifact[] }): Promise<BundleAnalysis> {
+  public async analyze(input: {
+    pageUrl: string;
+    domSnapshots?: DomPageSnapshot[];
+    artifacts: FormattedArtifact[];
+    deterministicSurface?: DeterministicSurface;
+  }): Promise<BundleAnalysis> {
     const validatedInput = analyzeInputSchema.parse(input);
 
     if (validatedInput.artifacts.length === 0) {
@@ -148,6 +156,7 @@ export class AiBundleAnalyzer {
           artifactIndex: artifactIndex + 1,
           artifactCount: prioritizedArtifacts.length,
           localRag,
+          lane: 1,
         };
 
         this.emitChunkEvent("started", firstChunkInput);
@@ -167,7 +176,7 @@ export class AiBundleAnalyzer {
           const remainingChunkAnalyses = await mapWithConcurrency(
             chunks.slice(1),
             this.analysisConcurrency,
-            async (chunk, offset): Promise<ChunkAnalysis> => {
+            async (chunk, offset, workerIndex): Promise<ChunkAnalysis> => {
               const chunkIndex = offset + 1;
               const chunkInput: ChunkTaskInput = {
                 pageUrl: validatedInput.pageUrl,
@@ -179,6 +188,7 @@ export class AiBundleAnalyzer {
                 artifactCount: prioritizedArtifacts.length,
                 localRag,
                 artifactPrimer,
+                lane: workerIndex + 1,
               };
 
               this.emitChunkEvent("started", chunkInput);
@@ -210,7 +220,13 @@ export class AiBundleAnalyzer {
       });
     }
 
-    return await this.summarizeFindings(validatedInput.pageUrl, validatedInput.domSnapshots, artifactSummaries, chunkAnalyses);
+    return await this.summarizeFindings(
+      validatedInput.pageUrl,
+      validatedInput.domSnapshots,
+      input.deterministicSurface,
+      artifactSummaries,
+      chunkAnalyses,
+    );
   }
 
   private emitChunkEvent(state: Extract<AnalysisProgressState, "started" | "completed">, input: ChunkTaskInput): void {
@@ -223,6 +239,7 @@ export class AiBundleAnalyzer {
       artifactUrl: input.artifact.url,
       chunkIndex: input.chunkIndex + 1,
       chunkCount: input.totalChunks,
+      lane: input.lane,
     });
   }
 
@@ -289,6 +306,7 @@ export class AiBundleAnalyzer {
       chunkIndex: input.chunkIndex + 1,
       chunkCount: input.totalChunks,
       agent,
+      lane: input.lane,
       ...(telemetry !== undefined ? { estimatedOutputTokens: telemetry.estimatedOutputTokens } : {}),
       ...(telemetry?.outputTokens !== undefined ? { outputTokens: telemetry.outputTokens } : {}),
       ...(telemetry?.tokensPerSecond !== undefined ? { tokensPerSecond: telemetry.tokensPerSecond } : {}),
@@ -369,6 +387,7 @@ export class AiBundleAnalyzer {
   private async summarizeFindings(
     pageUrl: string,
     domSnapshots: DomPageSnapshot[],
+    deterministicSurface: DeterministicSurface | undefined,
     artifactSummaries: ArtifactSummary[],
     chunkAnalyses: ChunkAnalysis[],
   ): Promise<BundleAnalysis> {
@@ -384,6 +403,8 @@ export class AiBundleAnalyzer {
           `Target page: ${pageUrl}`,
           "DOM snapshots:",
           JSON.stringify(domSnapshots, null, 2),
+          "Deterministic surface findings:",
+          JSON.stringify(deterministicSurface ?? {}, null, 2),
           "Artifact summaries:",
           JSON.stringify(artifactSummaries, null, 2),
           "Chunk analyses:",
