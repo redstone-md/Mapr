@@ -3,3 +3,4 @@ node_modules/
 Thumbs.db
 report-*.md
 mapr-run-*/
+mapr-run-*.zip
