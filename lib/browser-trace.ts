@@ -74,6 +74,9 @@ type StorageProbeResult = {
   sessionStorageKeys: string[];
   interestingGlobals: string[];
 };
+const DEFAULT_TRACE_TIMEOUT_MS = 8_000;
+const MAX_SNIPPET_BODY_BYTES = 32_000;
+const RESPONSE_SNIPPET_TIMEOUT_MS = 400;
 
 function clip(value: string | null | undefined, maxLength = 300): string | undefined {
   if (!value) {
@@ -142,15 +145,43 @@ async function safeResponseSnippet(response: Pick<PlaywrightResponse, "text" | "
   try {
     const headers = await response.headers();
     const contentType = headers["content-type"] ?? headers["Content-Type"] ?? "";
-    if (!/(json|text|javascript|html)/i.test(contentType)) {
+    const contentLength = Number(headers["content-length"] ?? headers["Content-Length"] ?? "0");
+    if (!/(json|text)/i.test(contentType) || (Number.isFinite(contentLength) && contentLength > MAX_SNIPPET_BODY_BYTES)) {
       return undefined;
     }
 
-    const text = await response.text();
+    const text = await Promise.race([
+      response.text(),
+      new Promise<string>((_, reject) => setTimeout(() => reject(new Error("response snippet timeout")), RESPONSE_SNIPPET_TIMEOUT_MS)),
+    ]);
     return clip(text);
   } catch {
     return undefined;
   }
+}
+
+function toValidUrlOrUndefined(value: string | null | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    return new URL(value).toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function shouldCaptureResponseSnippet(response: PlaywrightResponse): boolean {
+  const request = response.request();
+  const resourceType = request.resourceType();
+  if (resourceType !== "fetch" && resourceType !== "xhr") {
+    return false;
+  }
+
+  return /(auth|login|signin|signup|session|token|password|verify|mfa|2fa|oauth|captcha|challenge|risk|telemetry|fingerprint|device|profile)/i.test(
+    request.url(),
+  );
 }
 
 export class BrowserAssistedTracer {
@@ -161,7 +192,7 @@ export class BrowserAssistedTracer {
 
   public constructor(options: BrowserTraceOptions = {}) {
     this.enabled = options.enabled ?? false;
-    this.timeoutMs = Math.max(1_000, options.timeoutMs ?? 20_000);
+    this.timeoutMs = Math.max(1_000, options.timeoutMs ?? DEFAULT_TRACE_TIMEOUT_MS);
     this.onProgress = options.onProgress;
   }
 
@@ -207,7 +238,7 @@ export class BrowserAssistedTracer {
       context = await browser.newContext({ ignoreHTTPSErrors: true });
       await context.route("**/*", async (route: Route) => {
         const resourceType = route.request().resourceType();
-        if (resourceType === "image" || resourceType === "media" || resourceType === "font") {
+        if (resourceType === "image" || resourceType === "media" || resourceType === "font" || resourceType === "stylesheet") {
           await route.abort();
           return;
         }
@@ -216,18 +247,23 @@ export class BrowserAssistedTracer {
       });
 
       const page = await context.newPage();
+      context.setDefaultNavigationTimeout(this.timeoutMs);
       page.on("console", (message: ConsoleMessage) => {
-        const text = clip(message.text(), 240);
-        if (!text) {
+        try {
+          const text = clip(message.text(), 240);
+          if (!text) {
+            return;
+          }
+
+          consoleMessages.push(
+            browserConsoleMessageSchema.parse({
+              type: message.type(),
+              text,
+            }),
+          );
+        } catch {
           return;
         }
-
-        consoleMessages.push(
-          browserConsoleMessageSchema.parse({
-            type: message.type(),
-            text,
-          }),
-        );
       });
       page.on("pageerror", (error: Error) => {
         pageErrors.push(String(error));
@@ -243,29 +279,41 @@ export class BrowserAssistedTracer {
         }
       });
       page.on("response", async (response: PlaywrightResponse) => {
-        if (requests.length >= 160) {
+        try {
+          if (requests.length >= 160) {
+            return;
+          }
+
+          const request = response.request();
+          const requestUrl = toValidUrlOrUndefined(request.url());
+          if (!requestUrl) {
+            return;
+          }
+          const frameUrl = toValidUrlOrUndefined(request.frame()?.url());
+          const requestBodySnippet = clip(request.postData());
+          const responseBodySnippet = shouldCaptureResponseSnippet(response) ? await safeResponseSnippet(response) : undefined;
+          const contentType = response.headers()["content-type"];
+
+          requests.push(
+            browserRequestSchema.parse({
+              url: requestUrl,
+              method: request.method(),
+              resourceType: request.resourceType(),
+              status: response.status(),
+              ...(frameUrl !== undefined ? { frameUrl } : {}),
+              ...(requestBodySnippet !== undefined ? { requestBodySnippet } : {}),
+              ...(responseBodySnippet !== undefined ? { responseBodySnippet } : {}),
+              ...(contentType !== undefined ? { contentType } : {}),
+            }),
+          );
+        } catch {
           return;
         }
-
-        const request = response.request();
-        requests.push(
-          browserRequestSchema.parse({
-            url: request.url(),
-            method: request.method(),
-            resourceType: request.resourceType(),
-            status: response.status(),
-            frameUrl: request.frame()?.url(),
-            requestBodySnippet: clip(request.postData()),
-            responseBodySnippet: await safeResponseSnippet(response),
-            contentType: response.headers()["content-type"],
-          }),
-        );
       });
 
       this.onProgress?.("Navigating browser to target");
       await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: this.timeoutMs });
-      await page.waitForLoadState("networkidle", { timeout: Math.min(this.timeoutMs, 8_000) }).catch(() => undefined);
-      await page.waitForTimeout(1_500);
+      await page.waitForTimeout(Math.min(1_200, Math.max(600, Math.floor(this.timeoutMs / 4))));
       finalUrl = page.url();
       const html = await page.content();
       domSnapshot = this.domSnapshotBuilder.build(html, finalUrl || targetUrl);
