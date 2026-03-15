@@ -74,7 +74,7 @@ type StorageProbeResult = {
   sessionStorageKeys: string[];
   interestingGlobals: string[];
 };
-const DEFAULT_TRACE_TIMEOUT_MS = 8_000;
+const DEFAULT_TRACE_TIMEOUT_MS = 20_000;
 const MAX_SNIPPET_BODY_BYTES = 32_000;
 const RESPONSE_SNIPPET_TIMEOUT_MS = 400;
 const STEP_HEARTBEAT_MS = 2_000;
