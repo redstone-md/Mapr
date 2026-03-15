@@ -16,6 +16,7 @@ This repository is public for source visibility and collaboration. The license r
 - Same-origin crawler with bounded page count and crawl depth
 - JS bundle, worker, service worker, WASM, and source-map discovery
 - Iframe-aware crawling for same-origin embedded pages
+- Streaming AI generation with live throughput updates in the TUI
 - Local RAG mode for multi-megabyte bundles
 - Partial-report persistence when analysis fails mid-run
 - Headless automation mode for CI or batch workflows
@@ -41,7 +42,7 @@ Mapr does not analyze images, fonts, audio, video, PDFs, archives, or other pres
 - Built-in OpenAI-compatible presets for BlackBox AI, Nvidia NIM, and OnlySQ
 - Automatic model context-size detection from provider model metadata when available
 - Headless CLI mode for automation
-- Live crawler and swarm progress with agent-level tracking and progress bars
+- Live crawler and swarm progress with agent-level tracking, progress bars, and streaming TPS estimates
 
 ## Install
 
@@ -66,7 +67,7 @@ npx @redstone-md/mapr --help
 4. Crawl the target website, same-origin iframe pages, and discovered code artifacts with bounded page count and crawl depth
 5. Format analyzable content where possible
 6. Optionally build a local lexical RAG index for oversized artifacts
-7. Run a communicating swarm of analysis agents over chunked artifact content with structured-output fallback for providers that only support plain text
+7. Run a communicating swarm of analysis agents over chunked artifact content through streaming JSON generation so long-running requests keep producing output
 8. Generate a Markdown report in the current working directory
 
 ## Provider Presets
@@ -123,7 +124,7 @@ Mapr uses a communicating agent swarm per chunk:
 - `security`: identifies risks, persistence, caching, and operator tips
 - `synthesizer`: merges the upstream notes into the final chunk analysis
 
-Progress is shown directly in the TUI for crawler fetches, depth skips, discovered nested artifacts, and swarm agent/chunk execution.
+Progress is shown directly in the TUI for crawler fetches, depth skips, discovered nested artifacts, swarm agent/chunk execution, and live token-per-second estimates during provider streaming.
 
 ## Large Bundle Handling
 

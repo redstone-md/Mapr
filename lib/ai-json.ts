@@ -1,7 +1,21 @@
-import { generateText, Output } from "ai";
+import { streamText } from "ai";
 import { z } from "zod";
 
 const jsonFencePattern = /^```(?:json)?\s*([\s\S]*?)\s*```$/i;
+const STREAM_PROGRESS_INTERVAL_MS = 750;
+const ESTIMATED_CHARS_PER_TOKEN = 4;
+
+export interface StreamedObjectTelemetry {
+  elapsedMs: number;
+  estimatedOutputTokens: number;
+  outputTokens?: number;
+  tokensPerSecond?: number;
+}
+
+export interface StreamedObjectResult<TOutput> {
+  object: TOutput;
+  telemetry: StreamedObjectTelemetry;
+}
 
 function extractBalancedJsonSlice(source: string): string | null {
   const startIndex = source.search(/[\[{]/);
@@ -15,7 +29,6 @@ function extractBalancedJsonSlice(source: string): string | null {
 
   for (let index = startIndex; index < source.length; index += 1) {
     const character = source[index];
-
     if (!character) {
       continue;
     }
@@ -53,6 +66,33 @@ function extractBalancedJsonSlice(source: string): string | null {
   return null;
 }
 
+function formatJsonSystemPrompt(system: string, contract: string): string {
+  return [
+    system,
+    "Return only one valid JSON object.",
+    "Do not wrap the JSON in markdown fences.",
+    "Do not add explanations before or after the JSON.",
+    contract,
+  ].join("\n");
+}
+
+function calculateTokensPerSecond(tokenCount: number, elapsedMs: number): number | undefined {
+  if (tokenCount <= 0 || elapsedMs < 250) {
+    return undefined;
+  }
+
+  return Number((tokenCount / (elapsedMs / 1000)).toFixed(1));
+}
+
+export function estimateTokenCountFromText(source: string): number {
+  const trimmed = source.trim();
+  if (trimmed.length === 0) {
+    return 0;
+  }
+
+  return Math.max(1, Math.ceil(trimmed.length / ESTIMATED_CHARS_PER_TOKEN));
+}
+
 export function extractJsonFromText(source: string): unknown {
   const trimmed = source.trim();
   if (!trimmed) {
@@ -74,22 +114,7 @@ export function extractJsonFromText(source: string): unknown {
   }
 }
 
-export function shouldFallbackToTextJson(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  const message = error.message.toLowerCase();
-  return (
-    message.includes("responseformat") ||
-    message.includes("structured output") ||
-    message.includes("structuredoutputs") ||
-    message.includes("response did not match schema") ||
-    message.includes("no object generated")
-  );
-}
-
-export async function generateObjectWithTextFallback<TOutput>(input: {
+export async function generateObjectFromStream<TOutput>(input: {
   model: unknown;
   system: string;
   prompt: string;
@@ -97,38 +122,57 @@ export async function generateObjectWithTextFallback<TOutput>(input: {
   contract: string;
   maxRetries?: number;
   providerOptions?: Record<string, unknown>;
-}): Promise<TOutput> {
-  try {
-    const structuredResult = await generateText({
-      model: input.model as never,
-      system: input.system,
-      prompt: input.prompt,
-      output: Output.object({ schema: input.schema }),
-      maxRetries: input.maxRetries ?? 2,
-      ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions as never } : {}),
-    });
+  onProgress?: (telemetry: StreamedObjectTelemetry) => void;
+}): Promise<StreamedObjectResult<TOutput>> {
+  let streamedText = "";
+  const startedAt = Date.now();
+  let lastProgressAt = 0;
 
-    return input.schema.parse(structuredResult.output);
-  } catch (error) {
-    if (!shouldFallbackToTextJson(error)) {
-      throw error;
-    }
-  }
-
-  const textResult = await generateText({
+  const result = streamText({
     model: input.model as never,
-    system: [
-      input.system,
-      "Return only one valid JSON object.",
-      "Do not wrap the JSON in markdown fences.",
-      "Do not add explanations before or after the JSON.",
-      input.contract,
-    ].join("\n"),
+    system: formatJsonSystemPrompt(input.system, input.contract),
     prompt: input.prompt,
-    output: Output.text(),
     maxRetries: input.maxRetries ?? 2,
     ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions as never } : {}),
   });
 
-  return input.schema.parse(extractJsonFromText(textResult.output));
+  for await (const textPart of result.textStream) {
+    streamedText += textPart;
+
+    const now = Date.now();
+    if (input.onProgress !== undefined && now - lastProgressAt >= STREAM_PROGRESS_INTERVAL_MS) {
+      const estimatedOutputTokens = estimateTokenCountFromText(streamedText);
+      const tokensPerSecond = calculateTokensPerSecond(estimatedOutputTokens, now - startedAt);
+      input.onProgress({
+        elapsedMs: now - startedAt,
+        estimatedOutputTokens,
+        ...(tokensPerSecond !== undefined ? { tokensPerSecond } : {}),
+      });
+      lastProgressAt = now;
+    }
+  }
+
+  let usage: Awaited<typeof result.usage> | undefined;
+  try {
+    usage = await result.usage;
+  } catch {
+    usage = undefined;
+  }
+  const elapsedMs = Date.now() - startedAt;
+  const estimatedOutputTokens = estimateTokenCountFromText(streamedText);
+  const outputTokens = usage?.outputTokens ?? undefined;
+  const tokensPerSecond = calculateTokensPerSecond(outputTokens ?? estimatedOutputTokens, elapsedMs);
+  const telemetry: StreamedObjectTelemetry = {
+    elapsedMs,
+    estimatedOutputTokens,
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(tokensPerSecond !== undefined ? { tokensPerSecond } : {}),
+  };
+
+  input.onProgress?.(telemetry);
+
+  return {
+    object: input.schema.parse(extractJsonFromText(streamedText)),
+    telemetry,
+  };
 }

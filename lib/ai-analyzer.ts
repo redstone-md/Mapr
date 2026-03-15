@@ -13,7 +13,7 @@ import {
   type ChunkAnalysis,
   PartialAnalysisError,
 } from "./analysis-schema";
-import { generateObjectWithTextFallback } from "./ai-json";
+import { generateObjectFromStream, type StreamedObjectTelemetry } from "./ai-json";
 import { artifactTypeSchema } from "./artifacts";
 import type { FormattedArtifact } from "./formatter";
 import { LocalArtifactRag } from "./local-rag";
@@ -38,7 +38,7 @@ const analyzeInputSchema = z.object({
   ),
 });
 export type AnalysisProgressStage = "artifact" | "chunk" | "agent";
-export type AnalysisProgressState = "started" | "completed";
+export type AnalysisProgressState = "started" | "streaming" | "completed";
 
 export interface AnalysisProgressEvent {
   stage: AnalysisProgressStage;
@@ -50,6 +50,9 @@ export interface AnalysisProgressEvent {
   chunkIndex?: number;
   chunkCount?: number;
   agent?: SwarmAgentName;
+  estimatedOutputTokens?: number;
+  outputTokens?: number;
+  tokensPerSecond?: number;
 }
 
 interface AnalyzerOptions {
@@ -151,6 +154,13 @@ function normalizeAiError(error: unknown): Error {
   }
 
   return error;
+}
+
+function formatAgentTelemetrySuffix(telemetry: StreamedObjectTelemetry): string {
+  const tokenCount = telemetry.outputTokens ?? telemetry.estimatedOutputTokens;
+  const tokenLabel = telemetry.outputTokens !== undefined ? `${tokenCount} tok` : `~${tokenCount} tok`;
+  const tpsLabel = telemetry.tokensPerSecond !== undefined ? ` ${telemetry.tokensPerSecond} tps` : "";
+  return ` [${tokenLabel}${tpsLabel}]`;
 }
 
 export class AiBundleAnalyzer {
@@ -302,23 +312,39 @@ export class AiBundleAnalyzer {
 
       if (agent === "synthesizer") {
         const synthesized = await this.runSynthesisAgent(input, memory, this.getRetrievedContext(agent, input, memory));
-        memory[agent] = synthesized;
+        memory[agent] = synthesized.object;
+        this.emitProgress({
+          stage: "agent",
+          state: "completed",
+          message: `${agent} agent completed ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(synthesized.telemetry)}`,
+          artifactIndex: input.artifactIndex,
+          artifactCount: input.artifactCount,
+          artifactUrl: input.artifact.url,
+          chunkIndex: input.chunkIndex + 1,
+          chunkCount: input.totalChunks,
+          agent,
+          estimatedOutputTokens: synthesized.telemetry.estimatedOutputTokens,
+          ...(synthesized.telemetry.outputTokens !== undefined ? { outputTokens: synthesized.telemetry.outputTokens } : {}),
+          ...(synthesized.telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: synthesized.telemetry.tokensPerSecond } : {}),
+        });
       } else {
         const memo = await this.runMemoAgent(agent, input, memory, this.getRetrievedContext(agent, input, memory));
-        memory[agent] = memo;
+        memory[agent] = memo.object;
+        this.emitProgress({
+          stage: "agent",
+          state: "completed",
+          message: `${agent} agent completed ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(memo.telemetry)}`,
+          artifactIndex: input.artifactIndex,
+          artifactCount: input.artifactCount,
+          artifactUrl: input.artifact.url,
+          chunkIndex: input.chunkIndex + 1,
+          chunkCount: input.totalChunks,
+          agent,
+          estimatedOutputTokens: memo.telemetry.estimatedOutputTokens,
+          ...(memo.telemetry.outputTokens !== undefined ? { outputTokens: memo.telemetry.outputTokens } : {}),
+          ...(memo.telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: memo.telemetry.tokensPerSecond } : {}),
+        });
       }
-
-      this.emitProgress({
-        stage: "agent",
-        state: "completed",
-        message: `${agent} agent completed ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}`,
-        artifactIndex: input.artifactIndex,
-        artifactCount: input.artifactCount,
-        artifactUrl: input.artifact.url,
-        chunkIndex: input.chunkIndex + 1,
-        chunkCount: input.totalChunks,
-        agent,
-      });
     }
 
     return chunkAnalysisSchema.parse(memory.synthesizer);
@@ -332,11 +358,13 @@ export class AiBundleAnalyzer {
       chunk: string;
       chunkIndex: number;
       totalChunks: number;
+      artifactIndex: number;
+      artifactCount: number;
     },
     memory: Partial<Record<SwarmAgentName, unknown>>,
     retrievedContext: string[],
-  ): Promise<AgentMemo> {
-    return generateObjectWithTextFallback({
+  ): Promise<{ object: AgentMemo; telemetry: StreamedObjectTelemetry }> {
+    return generateObjectFromStream({
       model: this.providerClient.getModel(),
       system: getSwarmAgentPrompt(agent),
       prompt: createPromptEnvelope({
@@ -359,6 +387,22 @@ export class AiBundleAnalyzer {
           store: false,
         },
       },
+      onProgress: (telemetry) => {
+        this.emitProgress({
+          stage: "agent",
+          state: "streaming",
+          message: `${agent} agent streaming ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(telemetry)}`,
+          artifactIndex: input.artifactIndex,
+          artifactCount: input.artifactCount,
+          artifactUrl: input.artifact.url,
+          chunkIndex: input.chunkIndex + 1,
+          chunkCount: input.totalChunks,
+          agent,
+          estimatedOutputTokens: telemetry.estimatedOutputTokens,
+          ...(telemetry.outputTokens !== undefined ? { outputTokens: telemetry.outputTokens } : {}),
+          ...(telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: telemetry.tokensPerSecond } : {}),
+        });
+      },
     });
   }
 
@@ -369,11 +413,13 @@ export class AiBundleAnalyzer {
       chunk: string;
       chunkIndex: number;
       totalChunks: number;
+      artifactIndex: number;
+      artifactCount: number;
     },
     memory: Partial<Record<SwarmAgentName, unknown>>,
     retrievedContext: string[],
-  ): Promise<ChunkAnalysis> {
-    return generateObjectWithTextFallback({
+  ): Promise<{ object: ChunkAnalysis; telemetry: StreamedObjectTelemetry }> {
+    return generateObjectFromStream({
       model: this.providerClient.getModel(),
       system: getSwarmAgentPrompt("synthesizer"),
       prompt: createPromptEnvelope({
@@ -396,6 +442,22 @@ export class AiBundleAnalyzer {
           store: false,
         },
       },
+      onProgress: (telemetry) => {
+        this.emitProgress({
+          stage: "agent",
+          state: "streaming",
+          message: `synthesizer agent streaming ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(telemetry)}`,
+          artifactIndex: input.artifactIndex,
+          artifactCount: input.artifactCount,
+          artifactUrl: input.artifact.url,
+          chunkIndex: input.chunkIndex + 1,
+          chunkCount: input.totalChunks,
+          agent: "synthesizer",
+          estimatedOutputTokens: telemetry.estimatedOutputTokens,
+          ...(telemetry.outputTokens !== undefined ? { outputTokens: telemetry.outputTokens } : {}),
+          ...(telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: telemetry.tokensPerSecond } : {}),
+        });
+      },
     });
   }
 
@@ -405,7 +467,7 @@ export class AiBundleAnalyzer {
     chunkAnalyses: ChunkAnalysis[],
   ): Promise<BundleAnalysis> {
     try {
-      const result = await generateObjectWithTextFallback({
+      const result = await generateObjectFromStream({
         model: this.providerClient.getModel(),
         system: [
           getGlobalMissionPrompt(),
@@ -436,7 +498,7 @@ export class AiBundleAnalyzer {
       });
 
       return finalAnalysisSchema.parse({
-        ...result,
+        ...result.object,
         artifactSummaries,
         analyzedChunkCount: chunkAnalyses.length,
       });

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { extractJsonFromText, shouldFallbackToTextJson } from "../lib/ai-json";
+import { estimateTokenCountFromText, extractJsonFromText } from "../lib/ai-json";
 
 describe("extractJsonFromText", () => {
   test("parses fenced JSON", () => {
@@ -15,10 +15,10 @@ describe("extractJsonFromText", () => {
   });
 });
 
-describe("shouldFallbackToTextJson", () => {
-  test("matches unsupported structured output errors", () => {
-    expect(shouldFallbackToTextJson(new Error("The feature responseFormat is not supported."))).toBe(true);
-    expect(shouldFallbackToTextJson(new Error("No object generated: response did not match schema."))).toBe(true);
-    expect(shouldFallbackToTextJson(new Error("401 unauthorized"))).toBe(false);
+describe("estimateTokenCountFromText", () => {
+  test("returns a stable token estimate from text length", () => {
+    expect(estimateTokenCountFromText("")).toBe(0);
+    expect(estimateTokenCountFromText("abcd")).toBe(1);
+    expect(estimateTokenCountFromText("abcdefgh")).toBe(2);
   });
 });
