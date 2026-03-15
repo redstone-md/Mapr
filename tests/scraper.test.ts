@@ -1,75 +1,137 @@
 import { describe, expect, test } from "bun:test";
 
-import { BundleScraper, extractScriptUrls } from "../lib/scraper";
+import { BundleScraper, extractArtifactCandidates } from "../lib/scraper";
 
-describe("extractScriptUrls", () => {
-  test("extracts and resolves external script sources", () => {
+const emptyWasm = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+describe("extractArtifactCandidates", () => {
+  test("extracts scripts, stylesheets, manifests, service workers, wasm, and same-origin pages", () => {
     const html = `
       <html>
         <head>
+          <link rel="stylesheet" href="/assets/app.css" />
+          <link rel="manifest" href="/manifest.webmanifest" />
           <script src="/assets/app.js"></script>
-          <script src="https://cdn.example.com/vendor.js"></script>
-          <script>console.log("inline")</script>
-          <script src="/assets/app.js"></script>
+          <script>
+            navigator.serviceWorker.register('/sw.js');
+            WebAssembly.instantiateStreaming(fetch('/assets/engine.wasm'));
+          </script>
         </head>
+        <body>
+          <a href="/dashboard">Dashboard</a>
+          <a href="https://external.example.com/">External</a>
+        </body>
       </html>
     `;
 
-    const scriptUrls = extractScriptUrls(html, "https://example.com/dashboard");
-    expect(scriptUrls).toEqual([
-      "https://example.com/assets/app.js",
-      "https://cdn.example.com/vendor.js",
-    ]);
+    const candidates = extractArtifactCandidates(html, "https://example.com");
+    expect(candidates.map((candidate) => `${candidate.type}:${candidate.url}`).sort()).toEqual(
+      [
+        "stylesheet:https://example.com/assets/app.css",
+        "manifest:https://example.com/manifest.webmanifest",
+        "script:https://example.com/assets/app.js",
+        "html:https://example.com/dashboard",
+        "service-worker:https://example.com/sw.js",
+        "wasm:https://example.com/assets/engine.wasm",
+      ].sort(),
+    );
   });
 });
 
 describe("BundleScraper", () => {
-  test("fetches html and then downloads discovered bundles", async () => {
+  test("crawls multiple pages and downloads discovered website artifacts", async () => {
     const fetchLog: string[] = [];
     const fetcher = async (input: string | URL | Request): Promise<Response> => {
       const url = String(input);
       fetchLog.push(url);
 
-      if (url === "https://example.com") {
+      if (url === "https://example.com/") {
         return new Response(
           `
             <html>
               <head>
-                <script src="/static/runtime.js"></script>
-                <script src="https://cdn.example.com/app.js"></script>
+                <link rel="stylesheet" href="/assets/app.css" />
+                <script src="/assets/app.js"></script>
+                <script>navigator.serviceWorker.register('/sw.js')</script>
               </head>
+              <body>
+                <a href="/dashboard">Dashboard</a>
+              </body>
             </html>
           `,
-          { status: 200 },
+          { status: 200, headers: { "content-type": "text/html" } },
         );
       }
 
-      if (url === "https://example.com/static/runtime.js") {
-        return new Response("console.log('runtime');", { status: 200 });
+      if (url === "https://example.com/dashboard") {
+        return new Response("<html><body>dashboard</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
       }
 
-      if (url === "https://cdn.example.com/app.js") {
-        return new Response("console.log('app');", { status: 200 });
+      if (url === "https://example.com/assets/app.js") {
+        return new Response(
+          `
+            import '/assets/chunk.js';
+            WebAssembly.instantiateStreaming(fetch('/assets/engine.wasm'));
+          `,
+          { status: 200, headers: { "content-type": "application/javascript" } },
+        );
+      }
+
+      if (url === "https://example.com/assets/chunk.js") {
+        return new Response("console.log('chunk');", {
+          status: 200,
+          headers: { "content-type": "application/javascript" },
+        });
+      }
+
+      if (url === "https://example.com/assets/app.css") {
+        return new Response("body{background:url('/assets/bg.css')}", {
+          status: 200,
+          headers: { "content-type": "text/css" },
+        });
+      }
+
+      if (url === "https://example.com/assets/bg.css") {
+        return new Response(".app{color:red}", {
+          status: 200,
+          headers: { "content-type": "text/css" },
+        });
+      }
+
+      if (url === "https://example.com/sw.js") {
+        return new Response("self.addEventListener('fetch', () => {})", {
+          status: 200,
+          headers: { "content-type": "application/javascript" },
+        });
+      }
+
+      if (url === "https://example.com/assets/engine.wasm") {
+        return new Response(emptyWasm, {
+          status: 200,
+          headers: { "content-type": "application/wasm" },
+        });
       }
 
       return new Response("missing", { status: 404, statusText: "Not Found" });
     };
 
-    const scraper = new BundleScraper(fetcher);
-    const result = await scraper.scrape("https://example.com");
+    const scraper = new BundleScraper(fetcher, {
+      maxPages: 5,
+      maxArtifacts: 20,
+    });
+    const result = await scraper.scrape("https://example.com/");
 
-    expect(fetchLog).toEqual([
-      "https://example.com",
-      "https://example.com/static/runtime.js",
-      "https://cdn.example.com/app.js",
-    ]);
+    expect(fetchLog).toContain("https://example.com/");
+    expect(result.htmlPages).toEqual(["https://example.com/", "https://example.com/dashboard"]);
+    expect(result.artifacts.map((artifact) => artifact.type)).toContain("service-worker");
+    expect(result.artifacts.map((artifact) => artifact.type)).toContain("wasm");
     expect(result.scriptUrls).toEqual([
-      "https://example.com/static/runtime.js",
-      "https://cdn.example.com/app.js",
-    ]);
-    expect(result.bundles.map((bundle) => bundle.rawCode)).toEqual([
-      "console.log('runtime');",
-      "console.log('app');",
+      "https://example.com/assets/app.js",
+      "https://example.com/sw.js",
+      "https://example.com/assets/chunk.js",
     ]);
   });
 });

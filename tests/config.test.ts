@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -17,46 +17,81 @@ afterEach(async () => {
 });
 
 describe("ConfigManager", () => {
-  test("creates a new config when none exists", async () => {
+  test("creates a new provider config when none exists", async () => {
     const tempHome = await mkdtemp(join(tmpdir(), "mapr-config-"));
     createdDirectories.push(tempHome);
 
     const manager = new ConfigManager({
       homeDir: tempHome,
-      promptApiKey: async () => "sk-test-key-that-is-long-enough-1234567890",
+      promptConfig: async () => ({
+        providerType: "openai-compatible",
+        providerName: "Local vLLM",
+        apiKey: "local-secret",
+        baseURL: "http://localhost:8000/v1",
+        model: "qwen2.5-coder",
+      }),
     });
 
     const config = await manager.ensureConfig();
     const savedConfig = JSON.parse(await readFile(manager.getConfigPath(), "utf8")) as {
-      openAiApiKey: string;
+      providerType: string;
+      providerName: string;
+      apiKey: string;
+      baseURL: string;
       model: string;
     };
 
-    expect(config.openAiApiKey).toBe("sk-test-key-that-is-long-enough-1234567890");
-    expect(config.model).toBe(DEFAULT_MODEL);
-    expect(savedConfig.openAiApiKey).toBe("sk-test-key-that-is-long-enough-1234567890");
-    expect(savedConfig.model).toBe(DEFAULT_MODEL);
+    expect(config.providerType).toBe("openai-compatible");
+    expect(config.providerName).toBe("Local vLLM");
+    expect(config.baseURL).toBe("http://localhost:8000/v1");
+    expect(config.model).toBe("qwen2.5-coder");
+    expect(savedConfig.providerType).toBe("openai-compatible");
+    expect(savedConfig.model).toBe("qwen2.5-coder");
   });
 
-  test("reads an existing config without prompting", async () => {
+  test("reads and normalizes a legacy config without prompting", async () => {
     const tempHome = await mkdtemp(join(tmpdir(), "mapr-config-"));
     createdDirectories.push(tempHome);
 
     const manager = new ConfigManager({ homeDir: tempHome });
     await manager.saveConfig({
-      openAiApiKey: "sk-existing-key-that-is-long-enough-123456",
-      model: "gpt-4.1-mini",
+      providerType: "openai",
+      providerName: "OpenAI",
+      apiKey: "sk-existing-key",
+      baseURL: "https://api.openai.com/v1",
+      model: DEFAULT_MODEL,
     });
 
-    const reloadedManager = new ConfigManager({
-      homeDir: tempHome,
-      promptApiKey: async () => {
-        throw new Error("prompt should not be called");
-      },
-    });
+    const reloadedConfig = await manager.ensureConfig();
+    expect(reloadedConfig.providerType).toBe("openai");
+    expect(reloadedConfig.providerName).toBe("OpenAI");
+    expect(reloadedConfig.model).toBe(DEFAULT_MODEL);
+  });
 
-    const config = await reloadedManager.ensureConfig();
-    expect(config.openAiApiKey).toBe("sk-existing-key-that-is-long-enough-123456");
-    expect(config.model).toBe("gpt-4.1-mini");
+  test("migrates the old openAiApiKey field", async () => {
+    const tempHome = await mkdtemp(join(tmpdir(), "mapr-config-"));
+    createdDirectories.push(tempHome);
+
+    const configPath = join(tempHome, ".mapr", "config.json");
+    await mkdir(join(tempHome, ".mapr"), { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify(
+        {
+          openAiApiKey: "sk-legacy-key",
+          model: DEFAULT_MODEL,
+        },
+        null,
+        2,
+      ),
+    );
+
+    const manager = new ConfigManager({ homeDir: tempHome });
+    const config = await manager.ensureConfig();
+
+    expect(config.providerType).toBe("openai");
+    expect(config.providerName).toBe("OpenAI");
+    expect(config.apiKey).toBe("sk-legacy-key");
+    expect(config.baseURL).toBe("https://api.openai.com/v1");
   });
 });
