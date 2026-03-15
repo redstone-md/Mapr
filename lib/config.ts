@@ -86,10 +86,14 @@ function normalizePersistedConfig(config: PersistedConfig | null): ConfigDraft |
   });
 }
 
-async function promptForModel(config: Omit<AiProviderConfig, "model" | "modelContextSize">, fetcher: FetchLike): Promise<string> {
+async function promptForModel(
+  config: Omit<AiProviderConfig, "model" | "modelContextSize">,
+  fetcher: FetchLike,
+  initialModel?: string,
+): Promise<string> {
   const providerClient = new AiProviderClient({
     ...config,
-    model: DEFAULT_MODEL,
+    model: initialModel ?? DEFAULT_MODEL,
     modelContextSize: DEFAULT_MODEL_CONTEXT_SIZE,
   });
 
@@ -149,7 +153,7 @@ async function promptForModel(config: Omit<AiProviderConfig, "model" | "modelCon
           await text({
             message: "Enter model ID manually",
             placeholder: DEFAULT_MODEL,
-            initialValue: DEFAULT_MODEL,
+            initialValue: initialModel ?? DEFAULT_MODEL,
             validate(value) {
               const parsed = z.string().trim().min(1).safeParse(value);
               return parsed.success ? undefined : "Model is required.";
@@ -168,7 +172,7 @@ async function promptForModel(config: Omit<AiProviderConfig, "model" | "modelCon
         await text({
           message: "Enter model ID manually",
           placeholder: DEFAULT_MODEL,
-          initialValue: DEFAULT_MODEL,
+          initialValue: initialModel ?? DEFAULT_MODEL,
           validate(value) {
             const parsed = z.string().trim().min(1).safeParse(value);
             return parsed.success ? undefined : "Model is required.";
@@ -356,17 +360,16 @@ export class ConfigManager {
       ),
     );
 
-    const model = existingConfig?.model && existingConfig.providerType === providerType
-      ? existingConfig.model
-      : await promptForModel(
-          {
-            providerType,
-            providerName,
-            baseURL,
-            apiKey,
-          },
-          this.fetcher,
-        );
+    const model = await promptForModel(
+      {
+        providerType,
+        providerName,
+        baseURL,
+        apiKey,
+      },
+      this.fetcher,
+      existingConfig?.providerType === providerType ? existingConfig.model : undefined,
+    );
 
     const modelContextSize = await promptForContextSize(existingConfig?.modelContextSize ?? DEFAULT_MODEL_CONTEXT_SIZE);
 
