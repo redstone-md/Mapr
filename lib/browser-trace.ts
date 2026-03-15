@@ -77,6 +77,7 @@ type StorageProbeResult = {
 const DEFAULT_TRACE_TIMEOUT_MS = 8_000;
 const MAX_SNIPPET_BODY_BYTES = 32_000;
 const RESPONSE_SNIPPET_TIMEOUT_MS = 400;
+const STEP_HEARTBEAT_MS = 2_000;
 
 function clip(value: string | null | undefined, maxLength = 300): string | undefined {
   if (!value) {
@@ -184,6 +185,25 @@ function shouldCaptureResponseSnippet(response: PlaywrightResponse): boolean {
   );
 }
 
+async function withProgressHeartbeat<T>(
+  label: string,
+  onProgress: ((message: string) => void) | undefined,
+  task: () => Promise<T>,
+): Promise<T> {
+  onProgress?.(label);
+  const startedAt = Date.now();
+  const interval = setInterval(() => {
+    const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    onProgress?.(`${label} (${elapsedSeconds}s)`);
+  }, STEP_HEARTBEAT_MS);
+
+  try {
+    return await task();
+  } finally {
+    clearInterval(interval);
+  }
+}
+
 export class BrowserAssistedTracer {
   private readonly enabled: boolean;
   private readonly timeoutMs: number;
@@ -233,20 +253,25 @@ export class BrowserAssistedTracer {
     });
 
     try {
-      this.onProgress?.("Launching Playwright Chromium");
-      browser = await playwright.chromium.launch({ headless: true });
-      context = await browser.newContext({ ignoreHTTPSErrors: true });
-      await context.route("**/*", async (route: Route) => {
-        const resourceType = route.request().resourceType();
-        if (resourceType === "image" || resourceType === "media" || resourceType === "font" || resourceType === "stylesheet") {
-          await route.abort();
-          return;
-        }
+      browser = await withProgressHeartbeat("Launching Playwright Chromium", this.onProgress, () =>
+        playwright.chromium.launch({ headless: true, timeout: this.timeoutMs }),
+      );
+      context = await withProgressHeartbeat("Creating isolated browser context", this.onProgress, () =>
+        browser!.newContext({ ignoreHTTPSErrors: true }),
+      );
+      await withProgressHeartbeat("Installing request filters for non-code assets", this.onProgress, async () => {
+        await context!.route("**/*", async (route: Route) => {
+          const resourceType = route.request().resourceType();
+          if (resourceType === "image" || resourceType === "media" || resourceType === "font" || resourceType === "stylesheet") {
+            await route.abort();
+            return;
+          }
 
-        await route.continue();
+          await route.continue();
+        });
       });
 
-      const page = await context.newPage();
+      const page = await withProgressHeartbeat("Opening Playwright page", this.onProgress, () => context!.newPage());
       context.setDefaultNavigationTimeout(this.timeoutMs);
       page.on("console", (message: ConsoleMessage) => {
         try {
@@ -311,13 +336,17 @@ export class BrowserAssistedTracer {
         }
       });
 
-      this.onProgress?.("Navigating browser to target");
-      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: this.timeoutMs });
-      await page.waitForTimeout(Math.min(1_200, Math.max(600, Math.floor(this.timeoutMs / 4))));
+      await withProgressHeartbeat("Navigating browser to target", this.onProgress, async () => {
+        await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: this.timeoutMs });
+      });
+      await withProgressHeartbeat("Waiting for post-hydration runtime activity", this.onProgress, async () => {
+        await page.waitForTimeout(Math.min(1_200, Math.max(600, Math.floor(this.timeoutMs / 4))));
+      });
       finalUrl = page.url();
-      const html = await page.content();
+      const html = await withProgressHeartbeat("Capturing hydrated DOM", this.onProgress, () => page.content());
       domSnapshot = this.domSnapshotBuilder.build(html, finalUrl || targetUrl);
-      const storageSnapshot = await page.evaluate<StorageProbeResult>(() => {
+      const storageSnapshot = await withProgressHeartbeat("Collecting browser storage and globals", this.onProgress, () =>
+        page.evaluate<StorageProbeResult>(() => {
         const runtimeWindow = globalThis as Record<string, unknown> & {
           localStorage?: { length: number; key(index: number): string | null };
           sessionStorage?: { length: number; key(index: number): string | null };
@@ -337,12 +366,17 @@ export class BrowserAssistedTracer {
           sessionStorageKeys,
           interestingGlobals,
         };
-      });
+        }),
+      );
       storage = browserStorageSnapshotSchema.parse({
         ...storageSnapshot,
         interestingGlobals: inferInterestingGlobals(storageSnapshot.interestingGlobals),
         cookieNames: (await context.cookies()).map((cookie: { name: string }) => cookie.name).slice(0, 40),
       });
+
+      this.onProgress?.(
+        `Summarizing browser trace: ${requests.length} request(s), ${frameUrls.size || 1} frame(s), ${storage.cookieNames.length} cookie(s)`,
+      );
 
       const runtimeSignals = inferRuntimeSignals({
         pageText: html,
