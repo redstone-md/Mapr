@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { getProviderPreset, providerPresetSchema, providerTypeSchema } from "./provider";
+import { getProviderPreset, openAiModeSchema, providerPresetSchema, providerTypeSchema } from "./provider";
 
 const rawCliArgsSchema = z.object({
   help: z.boolean().default(false),
@@ -14,6 +14,7 @@ const rawCliArgsSchema = z.object({
   output: z.string().min(1).optional(),
   providerType: providerTypeSchema.optional(),
   providerPreset: providerPresetSchema.optional(),
+  openAiMode: openAiModeSchema.optional(),
   providerName: z.string().min(1).optional(),
   apiKey: z.string().min(1).optional(),
   baseURL: z.string().url().optional(),
@@ -29,6 +30,7 @@ const cliConfigOverrideSchema = z
   .object({
     providerType: providerTypeSchema.optional(),
     providerPreset: providerPresetSchema.optional(),
+    openAiMode: openAiModeSchema.optional(),
     providerName: z.string().min(1).optional(),
     apiKey: z.string().min(1).optional(),
     baseURL: z.string().url().optional(),
@@ -54,6 +56,7 @@ const optionMap = new Map<string, keyof CliArgs>([
   ["--output", "output"],
   ["--provider-type", "providerType"],
   ["--provider-preset", "providerPreset"],
+  ["--openai-mode", "openAiMode"],
   ["--provider-name", "providerName"],
   ["--api-key", "apiKey"],
   ["--base-url", "baseURL"],
@@ -117,6 +120,7 @@ export function getConfigOverrides(args: CliArgs) {
   const overrides: Record<string, unknown> = {};
 
   if (args.providerType !== undefined) overrides.providerType = args.providerType;
+  if (args.openAiMode !== undefined) overrides.openAiMode = args.openAiMode;
   if (args.providerPreset !== undefined) {
     const preset = getProviderPreset(args.providerPreset);
     overrides.providerType = "openai-compatible";
@@ -151,6 +155,7 @@ export function renderHelpText(): string {
     "Provider options:",
     "  --provider-type <type>          openai | openai-compatible",
     "  --provider-preset <preset>      custom | blackbox | nvidia-nim | onlysq",
+    "  --openai-mode <mode>            fast | reasoning",
     "  --provider-name <name>          Display name for the provider",
     "  --api-key <key>                 Provider API key",
     "  --base-url <url>                Base URL for the provider",

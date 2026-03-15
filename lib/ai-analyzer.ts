@@ -85,12 +85,14 @@ export class AiBundleAnalyzer {
   private readonly localRagEnabled: boolean;
   private readonly analysisConcurrency: number;
   private readonly onProgress: ((event: AnalysisProgressEvent) => void) | undefined;
+  private readonly providerOptions: Record<string, unknown>;
 
   public constructor(options: AnalyzerOptions) {
     this.providerClient = new AiProviderClient(options.providerConfig);
     this.chunkSizeBytes = options.chunkSizeBytes ?? deriveChunkSizeBytes(options.providerConfig.modelContextSize);
     this.localRagEnabled = options.localRag ?? false;
     this.analysisConcurrency = Math.max(1, Math.floor(options.analysisConcurrency ?? 1));
+    this.providerOptions = this.providerClient.getProviderOptions();
     this.onProgress = options.onProgress;
   }
 
@@ -271,7 +273,7 @@ export class AiBundleAnalyzer {
       ].join("\n"),
       attempts: 4,
       maxRetries: 2,
-      providerOptions: { openai: { store: false } },
+      providerOptions: this.providerOptions,
       onRetry: (attempt, error) =>
         this.emitAgentEvent(
           "streaming",
@@ -306,7 +308,7 @@ export class AiBundleAnalyzer {
       ].join("\n"),
       attempts: 4,
       maxRetries: 2,
-      providerOptions: { openai: { store: false } },
+      providerOptions: this.providerOptions,
       onRetry: (attempt, error) =>
         this.emitAgentEvent(
           "streaming",
@@ -346,7 +348,7 @@ export class AiBundleAnalyzer {
         ].join("\n"),
         attempts: 4,
         maxRetries: 2,
-        providerOptions: { openai: { store: false } },
+        providerOptions: this.providerOptions,
       });
 
       return finalAnalysisSchema.parse({

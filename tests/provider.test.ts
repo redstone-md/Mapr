@@ -7,6 +7,7 @@ import {
   inferCodexMode,
   inferProviderPreset,
   resolveCodexModelForMode,
+  supportsOpenAiMode,
 } from "../lib/provider";
 
 describe("AiProviderClient", () => {
@@ -118,5 +119,25 @@ describe("provider metadata helpers", () => {
     expect(inferCodexMode("gpt-5.1-codex-mini")).toBe("fast");
     expect(inferCodexMode("gpt-5.1-codex-max")).toBe("reasoning");
     expect(findKnownModelInfo("gpt-5.1-codex-max")?.usageLimitsNote).toContain("5h");
+  });
+
+  test("supports generic openai mode for gpt-5.4 and exposes reasoning effort", () => {
+    const client = new AiProviderClient({
+      providerType: "openai",
+      providerName: "OpenAI",
+      openAiMode: "fast",
+      apiKey: "secret",
+      baseURL: "https://api.openai.com/v1",
+      model: "gpt-5.4",
+      modelContextSize: 128000,
+    });
+
+    expect(supportsOpenAiMode("gpt-5.4")).toBe(true);
+    expect(client.getProviderOptions()).toEqual({
+      openai: {
+        store: false,
+        reasoningEffort: "low",
+      },
+    });
   });
 });

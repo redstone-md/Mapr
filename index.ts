@@ -255,6 +255,7 @@ async function run(): Promise<void> {
     `${pc.bold("Target:")} ${scrapeResult.pageUrl}`,
     `${pc.bold("Provider:")} ${config.providerName} (${config.model})`,
     `${pc.bold("Context size:")} ${config.modelContextSize.toLocaleString()} tokens`,
+    ...(config.openAiMode !== undefined ? [`${pc.bold("OpenAI mode:")} ${config.openAiMode}`] : []),
     ...(isCodexModel(config.model) && selectedModelInfo?.usageLimitsNote ? [`${pc.bold("Codex limits:")} ${selectedModelInfo.usageLimitsNote}`] : []),
     `${pc.bold("Concurrency:")} ${analysisConcurrency}`,
     `${pc.bold("Local RAG:")} ${args.localRag ? "enabled" : "disabled"}`,

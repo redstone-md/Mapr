@@ -8,6 +8,7 @@ export const DEFAULT_MODEL_CONTEXT_SIZE = 128000;
 
 export const providerTypeSchema = z.enum(["openai", "openai-compatible"]);
 export const providerPresetSchema = z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]);
+export const openAiModeSchema = z.enum(["fast", "reasoning"]);
 
 export interface ProviderPreset {
   id: z.infer<typeof providerPresetSchema>;
@@ -81,6 +82,7 @@ const openAiCompatiblePresetMap = new Map(openAiCompatiblePresetDefinitions.map(
 export const aiProviderConfigSchema = z.object({
   providerType: providerTypeSchema.default("openai"),
   providerPreset: providerPresetSchema.optional(),
+  openAiMode: openAiModeSchema.optional(),
   providerName: z.string().min(1).default("OpenAI"),
   apiKey: z.string().min(1, "API key is required."),
   baseURL: z.string().trim().url("Base URL must be a valid URL.").default(DEFAULT_OPENAI_BASE_URL),
@@ -364,6 +366,11 @@ export function isCodexModel(modelId: string): boolean {
   return normalizedModelId.includes("codex");
 }
 
+export function supportsOpenAiMode(modelId: string): boolean {
+  const normalizedModelId = modelId.toLowerCase();
+  return isCodexModel(normalizedModelId) || /^gpt-5(?:\.\d+)?$/.test(normalizedModelId);
+}
+
 export function inferCodexMode(modelId: string): "fast" | "reasoning" | undefined {
   const normalizedModelId = modelId.toLowerCase();
   if (!isCodexModel(normalizedModelId)) {
@@ -388,6 +395,18 @@ export function resolveCodexModelForMode(modelId: string, mode: "fast" | "reason
   }
 
   return modelId;
+}
+
+export function toOpenAiReasoningEffort(mode: z.infer<typeof openAiModeSchema> | undefined): "low" | "high" | undefined {
+  if (mode === "fast") {
+    return "low";
+  }
+
+  if (mode === "reasoning") {
+    return "high";
+  }
+
+  return undefined;
 }
 
 export function extractContextWindowFromMetadata(value: unknown): number | undefined {
@@ -415,6 +434,20 @@ export class AiProviderClient {
 
   public getConfig(): AiProviderConfig {
     return this.config;
+  }
+
+  public getProviderOptions(): Record<string, unknown> {
+    const openAiOptions: Record<string, unknown> = {
+      store: false,
+    };
+    const reasoningEffort = toOpenAiReasoningEffort(this.config.openAiMode);
+    if (reasoningEffort !== undefined && this.config.providerType === "openai") {
+      openAiOptions.reasoningEffort = reasoningEffort;
+    }
+
+    return {
+      openai: openAiOptions,
+    };
   }
 
   public getModel(modelId = this.config.model) {

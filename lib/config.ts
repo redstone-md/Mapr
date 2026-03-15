@@ -16,7 +16,9 @@ import {
   inferProviderPreset,
   inferCodexMode,
   isCodexModel,
+  openAiModeSchema,
   resolveCodexModelForMode,
+  supportsOpenAiMode,
   type AiProviderConfig,
   type ProviderModelInfo,
 } from "./provider";
@@ -25,6 +27,7 @@ const persistedConfigSchema = z
   .object({
     providerType: z.enum(["openai", "openai-compatible"]).optional(),
     providerPreset: z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]).optional(),
+    openAiMode: openAiModeSchema.optional(),
     providerName: z.string().min(1).optional(),
     apiKey: z.string().min(1).optional(),
     openAiApiKey: z.string().min(1).optional(),
@@ -38,6 +41,7 @@ const configDraftSchema = aiProviderConfigSchema.partial();
 const modelListingConfigSchema = z.object({
   providerType: z.enum(["openai", "openai-compatible"]).default("openai"),
   providerPreset: z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]).optional(),
+  openAiMode: openAiModeSchema.optional(),
   providerName: z.string().min(1).default("OpenAI"),
   apiKey: z.string().min(1),
   baseURL: z.string().trim().url().default(DEFAULT_OPENAI_BASE_URL),
@@ -96,6 +100,7 @@ function normalizePersistedConfig(config: PersistedConfig | null): ConfigDraft |
       (config.providerType === "openai-compatible" || providerType === "openai-compatible"
         ? inferProviderPreset(baseURL, providerType)
         : undefined),
+    openAiMode: config.openAiMode,
     providerName: config.providerName ?? "OpenAI",
     apiKey: config.apiKey ?? config.openAiApiKey,
     baseURL,
@@ -451,15 +456,21 @@ export class ConfigManager {
       existingConfig?.providerType === providerType ? existingConfig.model : undefined,
     );
 
-    const finalModel =
-      providerType === "openai" && isCodexModel(model.id)
+    const openAiMode =
+      providerType === "openai" && supportsOpenAiMode(model.id)
         ? await (async () => {
-            const codexMode = await promptForCodexMode(
+            const selectedMode = await promptForCodexMode(
               inferCodexMode(existingConfig?.model ?? model.id) ?? inferCodexMode(model.id) ?? "reasoning",
             );
-            const resolvedModelId = resolveCodexModelForMode(model.id, codexMode);
-            return findKnownModelInfo(resolvedModelId) ?? { id: resolvedModelId };
+            return selectedMode;
           })()
+        : undefined;
+
+    const finalModel =
+      providerType === "openai" && isCodexModel(model.id)
+        ? findKnownModelInfo(resolveCodexModelForMode(model.id, openAiMode ?? "reasoning")) ?? {
+            id: resolveCodexModelForMode(model.id, openAiMode ?? "reasoning"),
+          }
         : model;
 
     const modelContextSize =
@@ -468,6 +479,7 @@ export class ConfigManager {
     return aiProviderConfigSchema.parse({
       providerType,
       ...(providerPreset !== undefined ? { providerPreset } : {}),
+      ...(openAiMode !== undefined ? { openAiMode } : {}),
       providerName,
       baseURL,
       apiKey,

@@ -10,6 +10,8 @@ describe("parseCliArgs", () => {
       "http://localhost:5178",
       "--provider-type",
       "openai-compatible",
+      "--openai-mode",
+      "fast",
       "--provider-name",
       "Local vLLM",
       "--api-key",
@@ -33,6 +35,7 @@ describe("parseCliArgs", () => {
 
     expect(args.headless).toBe(true);
     expect(args.url).toBe("http://localhost:5178");
+    expect(args.openAiMode).toBe("fast");
     expect(args.contextSize).toBe(512000);
     expect(args.analysisConcurrency).toBe(3);
     expect(args.localRag).toBe(true);
@@ -46,6 +49,8 @@ describe("parseCliArgs", () => {
       parseCliArgs([
         "--provider-type",
         "openai-compatible",
+        "--openai-mode",
+        "reasoning",
         "--model",
         "qwen2.5-coder",
         "--context-size",
@@ -55,6 +60,7 @@ describe("parseCliArgs", () => {
 
     expect(overrides).toEqual({
       providerType: "openai-compatible",
+      openAiMode: "reasoning",
       model: "qwen2.5-coder",
       modelContextSize: 512000,
     });
