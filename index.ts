@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { cancel, confirm, intro, isCancel, log, outro, select, spinner, text } from "@clack/prompts";
+import { join } from "path";
 import pc from "picocolors";
 import packageJson from "./package.json";
 
@@ -357,6 +358,7 @@ async function run(): Promise<void> {
     },
     ...(args.output !== undefined ? { outputPathOverride: args.output } : {}),
   });
+  const htmlReportPath = join(runDirectory, "report.html");
   reportStep.stop(reportStatus === "partial" ? "Partial run artifacts written to disk" : "Run artifacts written to disk");
 
   const selectedModelInfo = findKnownModelInfo(config.model);
@@ -384,6 +386,7 @@ async function run(): Promise<void> {
     ...(analysisError !== undefined ? [`${pc.bold("Analysis error:")} ${analysisError}`] : []),
     `${pc.bold("Repo:")} ${pc.underline("https://github.com/redstone-md/Mapr")}`,
     `${pc.bold("Artifacts dir:")} ${pc.underline(runDirectory)}`,
+    `${pc.bold("HTML report:")} ${pc.underline(htmlReportPath)}`,
     `${pc.bold("Report:")} ${pc.underline(reportPath)}`,
     `${pc.bold("Disclaimer:")} Author and contributors assume no liability.`,
   ].join("\n");

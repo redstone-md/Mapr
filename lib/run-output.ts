@@ -7,6 +7,7 @@ import { artifactTypeSchema } from "./artifacts";
 import { deterministicSurfaceSchema, type DeterministicSurface } from "./surface-analysis";
 import { domPageSnapshotSchema, type DomPageSnapshot } from "./dom-snapshot";
 import type { FormattedArtifact } from "./formatter";
+import { HtmlReportBuilder } from "./html-report";
 import { ReportWriter } from "./reporter";
 
 const runOutputInputSchema = z.object({
@@ -93,6 +94,7 @@ function buildRunReadme(input: {
     "## Files",
     "",
     "- `report.md` or the requested Markdown output",
+    "- `report.html` interactive HTML report with code-map browser and manifest explorer",
     "- `metadata.json` high-level run metadata",
     "- `deterministic-surface.json` API/auth/captcha/fingerprinting/encryption findings",
     "- `dom-snapshots.json` static DOM snapshots",
@@ -104,6 +106,7 @@ function buildRunReadme(input: {
 
 export class RunArtifactsWriter {
   private readonly reportWriter = new ReportWriter();
+  private readonly htmlReportBuilder = new HtmlReportBuilder();
 
   public async writeRun(input: {
     targetUrl: string;
@@ -134,6 +137,16 @@ export class RunArtifactsWriter {
       analysis: validated.analysis,
       deterministicSurface: validated.deterministicSurface,
     });
+    const htmlReport = this.htmlReportBuilder.generate({
+      targetUrl: validated.targetUrl,
+      htmlPages: validated.htmlPages,
+      domSnapshots: validated.domSnapshots,
+      reportStatus: validated.reportStatus,
+      artifacts: validated.artifacts,
+      analysis: validated.analysis,
+      deterministicSurface: validated.deterministicSurface,
+      ...(validated.analysisError !== undefined ? { analysisError: validated.analysisError } : {}),
+    });
     await writeFile(reportPath, `${markdown}\n`, "utf8");
 
     const manifest = validated.artifacts.map((artifact, index) => {
@@ -159,6 +172,7 @@ export class RunArtifactsWriter {
       writeFile(join(runDirectory, "metadata.json"), `${JSON.stringify(validated.runMetadata, null, 2)}\n`, "utf8"),
       writeFile(join(runDirectory, "dom-snapshots.json"), `${JSON.stringify(validated.domSnapshots, null, 2)}\n`, "utf8"),
       writeFile(join(runDirectory, "deterministic-surface.json"), `${JSON.stringify(validated.deterministicSurface, null, 2)}\n`, "utf8"),
+      writeFile(join(runDirectory, "report.html"), `${htmlReport}\n`, "utf8"),
       writeFile(
         join(runDirectory, "README.md"),
         `${buildRunReadme({

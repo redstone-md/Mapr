@@ -165,12 +165,15 @@ mapr-run-example.com-2026-03-15T12-34-56-789Z
 The run directory contains:
 
 - `report.md`
+- `report.html`
 - `README.md`
 - `metadata.json`
 - `dom-snapshots.json`
 - `deterministic-surface.json`
 - `artifacts/raw/*`
 - `artifacts/formatted/*`
+
+The HTML report is self-contained and includes an interactive code-map browser, searchable function/symbol surface, API/auth/captcha/fingerprinting sections, and an artifact manifest view for faster engineering triage.
 
 If analysis fails after artifact discovery or formatting has already completed, Mapr still writes a partial run directory and includes the analysis error in the report.
 

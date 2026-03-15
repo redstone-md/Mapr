@@ -63,10 +63,12 @@ describe("RunArtifactsWriter", () => {
     const metadata = await readFile(join(result.runDirectory, "metadata.json"), "utf8");
     const manifest = await readFile(join(result.runDirectory, "artifacts", "index.json"), "utf8");
     const readme = await readFile(join(result.runDirectory, "README.md"), "utf8");
+    const htmlReport = await readFile(join(result.runDirectory, "report.html"), "utf8");
 
     expect(result.reportPath).toBe(join(outputDir, "report.md"));
     expect(metadata).toContain("\"test\": true");
     expect(manifest).toContain("\"rawPath\"");
     expect(readme).toContain("Disclaimer");
+    expect(htmlReport).toContain("Interactive Code Map");
   });
 });
