@@ -37,6 +37,7 @@ export interface ScrapeResult {
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type NumericScraperOptions = z.input<typeof scraperOptionsSchema>;
 type QueueEntry = { candidate: ArtifactCandidate; depth: number };
+type CrawlScope = "site" | "page";
 
 export interface ScraperProgressEvent {
   message: string;
@@ -51,6 +52,11 @@ interface ScraperOptions extends NumericScraperOptions {
 
 function isPageCandidate(candidate: ArtifactCandidate, rootOrigin: string): boolean {
   return candidate.type === "html" && new URL(candidate.url).origin === rootOrigin;
+}
+
+function isRootLikeEntry(url: string): boolean {
+  const pathname = new URL(url).pathname.toLowerCase();
+  return pathname === "/" || pathname === "" || pathname.endsWith("/index.html") || pathname.endsWith("/index.htm");
 }
 
 function shouldFollowCandidate(candidate: ArtifactCandidate, rootOrigin: string): boolean {
@@ -150,6 +156,7 @@ export class BundleScraper {
   public async scrape(pageUrl: string): Promise<ScrapeResult> {
     const validatedPageUrl = httpUrlSchema.parse(pageUrl);
     const rootOrigin = new URL(validatedPageUrl).origin;
+    const crawlScope: CrawlScope = isRootLikeEntry(validatedPageUrl) ? "site" : "page";
     const visitedUrls = new Set<string>();
     const htmlPages = new Set<string>();
     const artifacts: DiscoveredArtifact[] = [];
@@ -164,7 +171,9 @@ export class BundleScraper {
       },
     ];
 
-    queue.push(...(await this.discoverSupplementalPages(rootOrigin)).map((candidate) => ({ candidate, depth: 1 })));
+    if (crawlScope === "site") {
+      queue.push(...(await this.discoverSupplementalPages(rootOrigin)).map((candidate) => ({ candidate, depth: 1 })));
+    }
 
     while (queue.length > 0) {
       if (artifacts.length >= this.options.maxArtifacts) {
@@ -204,7 +213,7 @@ export class BundleScraper {
         depth,
       });
 
-      const artifact = await this.fetchArtifact(candidate, depth);
+      const artifact = await this.fetchArtifact(candidate, depth, candidate.url === validatedPageUrl);
       if (!artifact) {
         continue;
       }
@@ -217,7 +226,7 @@ export class BundleScraper {
         artifacts.push(artifact);
       }
 
-      const nestedCandidates = extractNestedCandidates(artifact);
+      const nestedCandidates = this.filterNestedCandidates(extractNestedCandidates(artifact), validatedPageUrl, crawlScope);
       for (const nestedCandidate of nestedCandidates) {
         if (!visitedUrls.has(nestedCandidate.url)) {
           queue.push({ candidate: nestedCandidate, depth: depth + 1 });
@@ -279,8 +288,12 @@ export class BundleScraper {
     return [...candidates.values()];
   }
 
-  private async fetchArtifact(candidate: ArtifactCandidate, depth: number): Promise<DiscoveredArtifact | null> {
-    const response = await this.fetchResponse(candidate.url, candidate.type);
+  private async fetchArtifact(candidate: ArtifactCandidate, depth: number, required: boolean): Promise<DiscoveredArtifact | null> {
+    const response = await this.fetchResponse(candidate.url, candidate.type, depth, required);
+    if (!response) {
+      return null;
+    }
+
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
 
     if (isIgnoredContentType(contentType)) {
@@ -335,7 +348,12 @@ export class BundleScraper {
     });
   }
 
-  private async fetchResponse(url: string, artifactType: ArtifactCandidate["type"]): Promise<Response> {
+  private async fetchResponse(
+    url: string,
+    artifactType: ArtifactCandidate["type"],
+    depth: number,
+    required: boolean,
+  ): Promise<Response | null> {
     try {
       const response = await this.fetcher(url, {
         headers: {
@@ -344,11 +362,31 @@ export class BundleScraper {
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to fetch ${artifactType} from ${url}: ${response.status} ${response.statusText}`);
+        if (required) {
+          throw new Error(`Failed to fetch ${artifactType} from ${url}: ${response.status} ${response.statusText}`);
+        }
+
+        this.emitProgress({
+          message: `Skipping ${artifactType} after ${response.status} ${response.statusText}: ${url}`,
+          url,
+          type: artifactType,
+          depth,
+        });
+        return null;
       }
 
       return response;
     } catch (error) {
+      if (!required) {
+        this.emitProgress({
+          message: `Skipping ${artifactType} after fetch error: ${url}`,
+          url,
+          type: artifactType,
+          depth,
+        });
+        return null;
+      }
+
       if (error instanceof Error) {
         throw new Error(`Unable to fetch ${artifactType} artifact ${url}: ${error.message}`);
       }
@@ -377,6 +415,50 @@ export class BundleScraper {
 
   private emitProgress(event: ScraperProgressEvent): void {
     this.onProgress?.(event);
+  }
+
+  private filterNestedCandidates(
+    candidates: ArtifactCandidate[],
+    entryUrl: string,
+    crawlScope: CrawlScope,
+  ): ArtifactCandidate[] {
+    if (crawlScope === "site") {
+      return candidates;
+    }
+
+    const entryPath = new URL(entryUrl).pathname.toLowerCase();
+    const entryStem = entryPath.replace(/(?:index)?\.html?$/i, "").replace(/\/+$/, "") || entryPath;
+    const entryDirectory = entryPath.includes("/") ? entryPath.slice(0, entryPath.lastIndexOf("/") + 1) : "/";
+
+    return candidates.filter((candidate) => {
+      if (candidate.type !== "html") {
+        return true;
+      }
+
+      const discoveredFrom = candidate.discoveredFrom.toLowerCase();
+      if (discoveredFrom.includes("iframe") || discoveredFrom.includes("form")) {
+        return true;
+      }
+
+      const candidatePath = new URL(candidate.url).pathname.toLowerCase();
+      if (candidatePath === entryPath) {
+        return true;
+      }
+
+      if (entryDirectory !== "/") {
+        return candidatePath.startsWith(entryDirectory);
+      }
+
+      if (entryStem !== entryPath && candidatePath.startsWith(entryStem)) {
+        return true;
+      }
+
+      if (candidatePath.startsWith(`${entryPath}/`)) {
+        return true;
+      }
+
+      return false;
+    });
   }
 }
 
