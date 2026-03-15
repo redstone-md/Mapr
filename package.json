@@ -30,6 +30,7 @@
     "mapr": "./bin/mapr"
   },
   "files": [
+    "assets",
     "bin",
     "index.ts",
     "lib",

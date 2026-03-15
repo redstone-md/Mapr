@@ -1,0 +1,50 @@
+<svg width="1280" height="320" viewBox="0 0 1280 320" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Mapr repository banner</title>
+  <desc id="desc">A dark technical banner showing Mapr's flow from crawl to artifacts to report.</desc>
+  <rect width="1280" height="320" fill="#111315"/>
+  <rect x="24" y="24" width="1232" height="272" rx="14" fill="#15181B" stroke="#2A2E33"/>
+  <rect x="56" y="56" width="360" height="208" rx="12" fill="#181C20" stroke="#2E3339"/>
+  <rect x="460" y="56" width="360" height="208" rx="12" fill="#181C20" stroke="#2E3339"/>
+  <rect x="864" y="56" width="360" height="208" rx="12" fill="#181C20" stroke="#2E3339"/>
+
+  <text x="80" y="88" fill="#EEE6DA" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="28" font-weight="700">mapr</text>
+  <text x="80" y="114" fill="#8E877C" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">frontend reverse engineering for bun</text>
+
+  <text x="80" y="154" fill="#C67A3B" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">crawl</text>
+  <text x="484" y="88" fill="#C67A3B" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">artifacts</text>
+  <text x="888" y="88" fill="#C67A3B" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">report</text>
+
+  <rect x="80" y="172" width="170" height="20" rx="6" fill="#22272C"/>
+  <rect x="80" y="204" width="240" height="20" rx="6" fill="#22272C"/>
+  <rect x="80" y="236" width="120" height="12" rx="6" fill="#7F6B52"/>
+  <rect x="210" y="236" width="112" height="12" rx="6" fill="#22272C"/>
+  <rect x="332" y="236" width="42" height="12" rx="6" fill="#22272C"/>
+
+  <rect x="500" y="114" width="88" height="36" rx="8" fill="#1F2428" stroke="#343A41"/>
+  <rect x="596" y="114" width="88" height="36" rx="8" fill="#1F2428" stroke="#343A41"/>
+  <rect x="692" y="114" width="88" height="36" rx="8" fill="#1F2428" stroke="#343A41"/>
+  <rect x="500" y="164" width="88" height="36" rx="8" fill="#1F2428" stroke="#343A41"/>
+  <rect x="596" y="164" width="88" height="36" rx="8" fill="#1F2428" stroke="#343A41"/>
+  <rect x="692" y="164" width="88" height="36" rx="8" fill="#1F2428" stroke="#343A41"/>
+  <text x="530" y="136" fill="#EEE6DA" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">js</text>
+  <text x="618" y="136" fill="#EEE6DA" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">sw</text>
+  <text x="705" y="136" fill="#EEE6DA" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">map</text>
+  <text x="522" y="186" fill="#EEE6DA" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">wasm</text>
+  <text x="607" y="186" fill="#EEE6DA" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">worker</text>
+  <text x="713" y="186" fill="#EEE6DA" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">rag</text>
+
+  <rect x="888" y="112" width="312" height="120" rx="10" fill="#1D2226" stroke="#343941"/>
+  <rect x="914" y="134" width="84" height="8" rx="4" fill="#C67A3B"/>
+  <rect x="914" y="156" width="182" height="8" rx="4" fill="#444B52"/>
+  <rect x="914" y="176" width="212" height="8" rx="4" fill="#444B52"/>
+  <rect x="914" y="196" width="168" height="8" rx="4" fill="#444B52"/>
+  <rect x="1108" y="156" width="66" height="52" rx="8" fill="#171B1E" stroke="#343941"/>
+  <path d="M1132 171H1150M1132 183H1148M1132 195H1144" stroke="#EEE6DA" stroke-width="2" stroke-linecap="round"/>
+
+  <path d="M392 160C414 160 426 160 446 160" stroke="#7F6B52" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M796 160C816 160 828 160 848 160" stroke="#7F6B52" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M438 160L426 154V166L438 160Z" fill="#C67A3B"/>
+  <path d="M840 160L828 154V166L840 160Z" fill="#C67A3B"/>
+
+  <text x="930" y="254" fill="#8E877C" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">crawl -> analyze -> report</text>
+</svg>
