@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { cancel, confirm, intro, isCancel, log, outro, spinner, text } from "@clack/prompts";
+import { cancel, confirm, intro, isCancel, log, outro, select, spinner, text } from "@clack/prompts";
 import pc from "picocolors";
 import packageJson from "./package.json";
 
@@ -13,6 +13,9 @@ import { renderProgressBar } from "./lib/progress";
 import { ReportWriter } from "./lib/reporter";
 import { BundleScraper } from "./lib/scraper";
 import { SWARM_AGENT_ORDER } from "./lib/swarm-prompts";
+
+process.env.AI_SDK_LOG_WARNINGS = "false";
+(globalThis as typeof globalThis & { AI_SDK_LOG_WARNINGS?: boolean }).AI_SDK_LOG_WARNINGS = false;
 
 function exitIfCancelled<T>(value: T): T {
   if (isCancel(value)) {
@@ -57,6 +60,30 @@ async function resolveTargetUrl(headless: boolean, prefilledUrl?: string): Promi
             return "Enter a valid URL.";
           }
         },
+      }),
+    ),
+  );
+}
+
+async function resolveAnalysisConcurrency(headless: boolean, prefilledValue: number | undefined, totalChunks: number): Promise<number> {
+  if (prefilledValue !== undefined) {
+    return prefilledValue;
+  }
+
+  if (headless || totalChunks <= 1) {
+    return 1;
+  }
+
+  return Number(
+    exitIfCancelled(
+      await select({
+        message: "Analysis concurrency",
+        initialValue: 2,
+        options: [
+          { value: 1, label: "1 lane", hint: "Most stable" },
+          { value: 2, label: "2 lanes", hint: "Recommended" },
+          { value: 4, label: "4 lanes", hint: "Aggressive" },
+        ],
       }),
     ),
   );
@@ -147,15 +174,17 @@ async function run(): Promise<void> {
       sum + chunkTextByBytes(artifact.formattedContent || artifact.content, deriveChunkSizeBytes(config.modelContextSize)).length,
     0,
   );
+  const analysisConcurrency = await resolveAnalysisConcurrency(headless, args.analysisConcurrency, totalChunks);
   const totalAgentTasks = Math.max(1, totalChunks * SWARM_AGENT_ORDER.length);
   let completedAgentTasks = 0;
 
   const analysisStep = spinner({ indicator: "timer" });
-  analysisStep.start(formatAnalysisProgress(0, totalAgentTasks, "Starting swarm analysis"));
+  analysisStep.start(formatAnalysisProgress(0, totalAgentTasks, `Starting swarm analysis (${analysisConcurrency} lane${analysisConcurrency === 1 ? "" : "s"})`));
 
   const analyzer = new AiBundleAnalyzer({
     providerConfig: config,
     localRag: args.localRag,
+    analysisConcurrency,
     onProgress(event) {
       if (event.stage === "agent" && event.state === "completed") {
         completedAgentTasks += 1;
@@ -224,6 +253,7 @@ async function run(): Promise<void> {
     `${pc.bold("Target:")} ${scrapeResult.pageUrl}`,
     `${pc.bold("Provider:")} ${config.providerName} (${config.model})`,
     `${pc.bold("Context size:")} ${config.modelContextSize.toLocaleString()} tokens`,
+    `${pc.bold("Concurrency:")} ${analysisConcurrency}`,
     `${pc.bold("Local RAG:")} ${args.localRag ? "enabled" : "disabled"}`,
     `${pc.bold("Pages:")} ${scrapeResult.htmlPages.length}`,
     `${pc.bold("Artifacts:")} ${formattedArtifacts.length}`,

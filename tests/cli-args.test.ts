@@ -20,6 +20,8 @@ describe("parseCliArgs", () => {
       "qwen2.5-coder",
       "--context-size",
       "512000",
+      "--analysis-concurrency",
+      "3",
       "--local-rag",
       "--max-pages",
       "6",
@@ -32,6 +34,7 @@ describe("parseCliArgs", () => {
     expect(args.headless).toBe(true);
     expect(args.url).toBe("http://localhost:5178");
     expect(args.contextSize).toBe(512000);
+    expect(args.analysisConcurrency).toBe(3);
     expect(args.localRag).toBe(true);
     expect(args.maxPages).toBe(6);
     expect(args.maxArtifacts).toBe(150);

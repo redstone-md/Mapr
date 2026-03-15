@@ -1,26 +1,28 @@
 import { z } from "zod";
-import { Buffer } from "buffer";
 
+import type { AgentMemo, ArtifactSummary, BundleAnalysis, ChunkAnalysis } from "./analysis-schema";
 import {
   agentMemoSchema,
-  artifactSummarySchema,
   buildAnalysisSnapshot,
   chunkAnalysisSchema,
   finalAnalysisSchema,
-  type AgentMemo,
-  type ArtifactSummary,
-  type BundleAnalysis,
-  type ChunkAnalysis,
   PartialAnalysisError,
 } from "./analysis-schema";
+import { createFallbackAgentMemo, createFallbackChunkAnalysis } from "./analysis-fallback";
+import {
+  chunkTextByBytes,
+  createPromptEnvelope,
+  deriveChunkSizeBytes,
+  formatAgentTelemetrySuffix,
+  normalizeAiError,
+} from "./analysis-helpers";
 import { generateObjectFromStream, type StreamedObjectTelemetry } from "./ai-json";
 import { artifactTypeSchema } from "./artifacts";
 import type { FormattedArtifact } from "./formatter";
 import { LocalArtifactRag } from "./local-rag";
+import { mapWithConcurrency } from "./promise-pool";
 import { AiProviderClient, type AiProviderConfig } from "./provider";
-import { SWARM_AGENT_ORDER, getGlobalMissionPrompt, getSwarmAgentPrompt, type SwarmAgentName } from "./swarm-prompts";
-
-export const DEFAULT_CHUNK_SIZE_BYTES = 80 * 1024;
+import { getGlobalMissionPrompt, getSwarmAgentPrompt, SWARM_AGENT_ORDER, type SwarmAgentName } from "./swarm-prompts";
 
 const analyzeInputSchema = z.object({
   pageUrl: z.string().url(),
@@ -37,6 +39,7 @@ const analyzeInputSchema = z.object({
     }),
   ),
 });
+
 export type AnalysisProgressStage = "artifact" | "chunk" | "agent";
 export type AnalysisProgressState = "started" | "streaming" | "completed";
 
@@ -59,120 +62,35 @@ interface AnalyzerOptions {
   providerConfig: AiProviderConfig;
   chunkSizeBytes?: number;
   localRag?: boolean;
+  analysisConcurrency?: number;
   onProgress?: (event: AnalysisProgressEvent) => void;
 }
 
-function createPromptEnvelope(input: {
+interface ChunkTaskInput {
   pageUrl: string;
   artifact: FormattedArtifact;
   chunk: string;
   chunkIndex: number;
   totalChunks: number;
-  memory?: unknown;
-  retrievedContext?: string[];
-}): string {
-  return [
-    `Target page: ${input.pageUrl}`,
-    `Artifact URL: ${input.artifact.url}`,
-    `Artifact type: ${input.artifact.type}`,
-    `Discovered from: ${input.artifact.discoveredFrom}`,
-    `Chunk ${input.chunkIndex + 1} of ${input.totalChunks}`,
-    input.artifact.formattingNote ? `Formatting note: ${input.artifact.formattingNote}` : "Formatting note: none",
-    input.memory ? `Swarm memory:\n${JSON.stringify(input.memory, null, 2)}` : "Swarm memory: none yet",
-    input.retrievedContext && input.retrievedContext.length > 0
-      ? `Local RAG evidence:\n${input.retrievedContext.map((segment, index) => `Segment ${index + 1}:\n${segment}`).join("\n\n")}`
-      : "Local RAG evidence: none",
-    "Artifact content:",
-    "```text",
-    input.chunk,
-    "```",
-  ].join("\n\n");
+  artifactIndex: number;
+  artifactCount: number;
+  localRag: LocalArtifactRag | null;
 }
 
-function findSplitBoundary(source: string, start: number, end: number): number {
-  const minimumPreferredIndex = start + Math.max(1, Math.floor((end - start) * 0.6));
-  const preferredDelimiters = new Set(["\n", ";", "}", " ", ","]);
-
-  for (let cursor = end - 1; cursor >= minimumPreferredIndex; cursor -= 1) {
-    const character = source[cursor];
-    if (character && preferredDelimiters.has(character)) {
-      return cursor + 1;
-    }
-  }
-
-  return end;
-}
-
-export function deriveChunkSizeBytes(modelContextSize: number): number {
-  const validatedContextSize = z.number().int().positive().parse(modelContextSize);
-  const derived = Math.floor(validatedContextSize * 0.9);
-  return Math.max(DEFAULT_CHUNK_SIZE_BYTES, derived);
-}
-
-export function chunkTextByBytes(source: string, maxBytes = DEFAULT_CHUNK_SIZE_BYTES): string[] {
-  const validatedSource = z.string().parse(source);
-  const validatedMaxBytes = z.number().int().positive().parse(maxBytes);
-
-  if (validatedSource.length === 0) {
-    return [];
-  }
-
-  const chunks: string[] = [];
-  let start = 0;
-
-  while (start < validatedSource.length) {
-    let end = Math.min(validatedSource.length, start + validatedMaxBytes);
-
-    while (end > start && Buffer.byteLength(validatedSource.slice(start, end), "utf8") > validatedMaxBytes) {
-      end -= 1;
-    }
-
-    if (end <= start) {
-      end = start + 1;
-    }
-
-    const splitAt = end === validatedSource.length ? end : findSplitBoundary(validatedSource, start, end);
-    chunks.push(validatedSource.slice(start, splitAt));
-    start = splitAt;
-  }
-
-  return chunks;
-}
-
-function normalizeAiError(error: unknown): Error {
-  if (!(error instanceof Error)) {
-    return new Error("AI analysis failed with an unknown error.");
-  }
-
-  const message = error.message.toLowerCase();
-  if (message.includes("rate limit")) {
-    return new Error("Provider rate limit hit during analysis. Please retry in a moment.");
-  }
-
-  if (message.includes("api key")) {
-    return new Error("The configured API key was rejected by the provider.");
-  }
-
-  return error;
-}
-
-function formatAgentTelemetrySuffix(telemetry: StreamedObjectTelemetry): string {
-  const tokenCount = telemetry.outputTokens ?? telemetry.estimatedOutputTokens;
-  const tokenLabel = telemetry.outputTokens !== undefined ? `${tokenCount} tok` : `~${tokenCount} tok`;
-  const tpsLabel = telemetry.tokensPerSecond !== undefined ? ` ${telemetry.tokensPerSecond} tps` : "";
-  return ` [${tokenLabel}${tpsLabel}]`;
-}
+export { chunkTextByBytes, deriveChunkSizeBytes } from "./analysis-helpers";
 
 export class AiBundleAnalyzer {
   private readonly providerClient: AiProviderClient;
   private readonly chunkSizeBytes: number;
   private readonly localRagEnabled: boolean;
+  private readonly analysisConcurrency: number;
   private readonly onProgress: ((event: AnalysisProgressEvent) => void) | undefined;
 
   public constructor(options: AnalyzerOptions) {
     this.providerClient = new AiProviderClient(options.providerConfig);
     this.chunkSizeBytes = options.chunkSizeBytes ?? deriveChunkSizeBytes(options.providerConfig.modelContextSize);
     this.localRagEnabled = options.localRag ?? false;
+    this.analysisConcurrency = Math.max(1, Math.floor(options.analysisConcurrency ?? 1));
     this.onProgress = options.onProgress;
   }
 
@@ -196,268 +114,214 @@ export class AiBundleAnalyzer {
 
     const chunkAnalyses: ChunkAnalysis[] = [];
     const artifactSummaries: ArtifactSummary[] = [];
+    const localRag = this.localRagEnabled ? new LocalArtifactRag(validatedInput.artifacts) : null;
 
-    try {
-      const localRag = this.localRagEnabled ? new LocalArtifactRag(validatedInput.artifacts) : null;
+    for (let artifactIndex = 0; artifactIndex < validatedInput.artifacts.length; artifactIndex += 1) {
+      const artifact = validatedInput.artifacts[artifactIndex]!;
+      const chunks = chunkTextByBytes(artifact.formattedContent || artifact.content, this.chunkSizeBytes);
 
-      for (let artifactIndex = 0; artifactIndex < validatedInput.artifacts.length; artifactIndex += 1) {
-        const artifact = validatedInput.artifacts[artifactIndex]!;
-        const chunks = chunkTextByBytes(artifact.formattedContent || artifact.content, this.chunkSizeBytes);
-        const perArtifactChunkAnalyses: ChunkAnalysis[] = [];
+      this.emitProgress({
+        stage: "artifact",
+        state: "started",
+        message: `Starting swarm analysis for artifact ${artifactIndex + 1}/${validatedInput.artifacts.length}: ${artifact.url}`,
+        artifactIndex: artifactIndex + 1,
+        artifactCount: validatedInput.artifacts.length,
+        artifactUrl: artifact.url,
+      });
 
-        this.emitProgress({
-          stage: "artifact",
-          state: "started",
-          message: `Starting swarm analysis for artifact ${artifactIndex + 1}/${validatedInput.artifacts.length}: ${artifact.url}`,
-          artifactIndex: artifactIndex + 1,
-          artifactCount: validatedInput.artifacts.length,
-          artifactUrl: artifact.url,
-        });
-
-        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-          this.emitProgress({
-            stage: "chunk",
-            state: "started",
-            message: `Starting chunk ${chunkIndex + 1}/${chunks.length} for ${artifact.url}`,
-            artifactIndex: artifactIndex + 1,
-            artifactCount: validatedInput.artifacts.length,
-            artifactUrl: artifact.url,
-            chunkIndex: chunkIndex + 1,
-            chunkCount: chunks.length,
-          });
-
-          const analysis = await this.analyzeChunkWithSwarm({
+      const perArtifactChunkAnalyses = await mapWithConcurrency(
+        chunks,
+        this.analysisConcurrency,
+        async (chunk, chunkIndex): Promise<ChunkAnalysis> => {
+          const chunkInput: ChunkTaskInput = {
             pageUrl: validatedInput.pageUrl,
             artifact,
-            chunk: chunks[chunkIndex] ?? "",
+            chunk,
             chunkIndex,
             totalChunks: chunks.length,
             artifactIndex: artifactIndex + 1,
             artifactCount: validatedInput.artifacts.length,
             localRag,
-          });
+          };
 
-          chunkAnalyses.push(analysis);
-          perArtifactChunkAnalyses.push(analysis);
+          this.emitChunkEvent("started", chunkInput);
+          const analysis = await this.analyzeChunkWithSwarm(chunkInput);
+          this.emitChunkEvent("completed", chunkInput);
+          return analysis;
+        },
+      );
 
-          this.emitProgress({
-            stage: "chunk",
-            state: "completed",
-            message: `Completed chunk ${chunkIndex + 1}/${chunks.length} for ${artifact.url}`,
-            artifactIndex: artifactIndex + 1,
-            artifactCount: validatedInput.artifacts.length,
-            artifactUrl: artifact.url,
-            chunkIndex: chunkIndex + 1,
-            chunkCount: chunks.length,
-          });
-        }
-
-        artifactSummaries.push({
-          url: artifact.url,
-          type: artifact.type,
-          chunkCount: chunks.length,
-          summary: perArtifactChunkAnalyses.map((analysis) => analysis.summary).join(" "),
-        });
-
-        this.emitProgress({
-          stage: "artifact",
-          state: "completed",
-          message: `Completed swarm analysis for artifact ${artifactIndex + 1}/${validatedInput.artifacts.length}: ${artifact.url}`,
-          artifactIndex: artifactIndex + 1,
-          artifactCount: validatedInput.artifacts.length,
-          artifactUrl: artifact.url,
-        });
-      }
-
-      return await this.summarizeFindings(validatedInput.pageUrl, artifactSummaries, chunkAnalyses);
-    } catch (error) {
-      const normalizedError = normalizeAiError(error);
-      const partialAnalysis = buildAnalysisSnapshot({
-        overview:
-          chunkAnalyses.length > 0 || artifactSummaries.length > 0
-            ? `Partial analysis only. Processing stopped because: ${normalizedError.message}`
-            : `Analysis aborted before any chunk completed. Cause: ${normalizedError.message}`,
-        artifactSummaries,
-        chunkAnalyses,
+      chunkAnalyses.push(...perArtifactChunkAnalyses);
+      artifactSummaries.push({
+        url: artifact.url,
+        type: artifact.type,
+        chunkCount: chunks.length,
+        summary: perArtifactChunkAnalyses.map((analysis) => analysis.summary).join(" "),
       });
 
-      throw new PartialAnalysisError(normalizedError.message, partialAnalysis);
+      this.emitProgress({
+        stage: "artifact",
+        state: "completed",
+        message: `Completed swarm analysis for artifact ${artifactIndex + 1}/${validatedInput.artifacts.length}: ${artifact.url}`,
+        artifactIndex: artifactIndex + 1,
+        artifactCount: validatedInput.artifacts.length,
+        artifactUrl: artifact.url,
+      });
     }
+
+    return await this.summarizeFindings(validatedInput.pageUrl, artifactSummaries, chunkAnalyses);
   }
 
-  private async analyzeChunkWithSwarm(input: {
-    pageUrl: string;
-    artifact: FormattedArtifact;
-    chunk: string;
-    chunkIndex: number;
-    totalChunks: number;
-    artifactIndex: number;
-    artifactCount: number;
-    localRag: LocalArtifactRag | null;
-  }): Promise<ChunkAnalysis> {
+  private emitChunkEvent(state: Extract<AnalysisProgressState, "started" | "completed">, input: ChunkTaskInput): void {
+    this.emitProgress({
+      stage: "chunk",
+      state,
+      message: `${state === "started" ? "Starting" : "Completed"} chunk ${input.chunkIndex + 1}/${input.totalChunks} for ${input.artifact.url}`,
+      artifactIndex: input.artifactIndex,
+      artifactCount: input.artifactCount,
+      artifactUrl: input.artifact.url,
+      chunkIndex: input.chunkIndex + 1,
+      chunkCount: input.totalChunks,
+    });
+  }
+
+  private async analyzeChunkWithSwarm(input: ChunkTaskInput): Promise<ChunkAnalysis> {
     const memory: Partial<Record<SwarmAgentName, AgentMemo | ChunkAnalysis>> = {};
 
     for (const agent of SWARM_AGENT_ORDER) {
-      this.emitProgress({
-        stage: "agent",
-        state: "started",
-        message: `${agent} agent running on ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}`,
-        artifactIndex: input.artifactIndex,
-        artifactCount: input.artifactCount,
-        artifactUrl: input.artifact.url,
-        chunkIndex: input.chunkIndex + 1,
-        chunkCount: input.totalChunks,
-        agent,
-      });
+      this.emitAgentEvent("started", agent, input, `${agent} agent running on ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}`);
 
-      if (agent === "synthesizer") {
-        const synthesized = await this.runSynthesisAgent(input, memory, this.getRetrievedContext(agent, input, memory));
-        memory[agent] = synthesized.object;
-        this.emitProgress({
-          stage: "agent",
-          state: "completed",
-          message: `${agent} agent completed ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(synthesized.telemetry)}`,
-          artifactIndex: input.artifactIndex,
-          artifactCount: input.artifactCount,
-          artifactUrl: input.artifact.url,
-          chunkIndex: input.chunkIndex + 1,
-          chunkCount: input.totalChunks,
-          agent,
-          estimatedOutputTokens: synthesized.telemetry.estimatedOutputTokens,
-          ...(synthesized.telemetry.outputTokens !== undefined ? { outputTokens: synthesized.telemetry.outputTokens } : {}),
-          ...(synthesized.telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: synthesized.telemetry.tokensPerSecond } : {}),
-        });
-      } else {
+      try {
+        if (agent === "synthesizer") {
+          const synthesized = await this.runSynthesisAgent(input, memory, this.getRetrievedContext(agent, input, memory));
+          memory[agent] = synthesized.object;
+          this.emitAgentCompletion(agent, input, synthesized.telemetry);
+          continue;
+        }
+
         const memo = await this.runMemoAgent(agent, input, memory, this.getRetrievedContext(agent, input, memory));
         memory[agent] = memo.object;
-        this.emitProgress({
-          stage: "agent",
-          state: "completed",
-          message: `${agent} agent completed ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(memo.telemetry)}`,
-          artifactIndex: input.artifactIndex,
-          artifactCount: input.artifactCount,
-          artifactUrl: input.artifact.url,
-          chunkIndex: input.chunkIndex + 1,
-          chunkCount: input.totalChunks,
+        this.emitAgentCompletion(agent, input, memo.telemetry);
+      } catch (error) {
+        const normalizedError = normalizeAiError(error);
+        memory[agent] =
+          agent === "synthesizer"
+            ? createFallbackChunkAnalysis({ artifactUrl: input.artifact.url, memory, error: normalizedError })
+            : createFallbackAgentMemo(agent, normalizedError);
+
+        this.emitAgentEvent(
+          "completed",
           agent,
-          estimatedOutputTokens: memo.telemetry.estimatedOutputTokens,
-          ...(memo.telemetry.outputTokens !== undefined ? { outputTokens: memo.telemetry.outputTokens } : {}),
-          ...(memo.telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: memo.telemetry.tokensPerSecond } : {}),
-        });
+          input,
+          `${agent} agent fell back ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}: ${normalizedError.message}`,
+        );
       }
     }
 
     return chunkAnalysisSchema.parse(memory.synthesizer);
   }
 
+  private emitAgentCompletion(agent: SwarmAgentName, input: ChunkTaskInput, telemetry: StreamedObjectTelemetry): void {
+    this.emitAgentEvent(
+      "completed",
+      agent,
+      input,
+      `${agent} agent completed ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(telemetry)}`,
+      telemetry,
+    );
+  }
+
+  private emitAgentEvent(
+    state: AnalysisProgressState,
+    agent: SwarmAgentName,
+    input: ChunkTaskInput,
+    message: string,
+    telemetry?: StreamedObjectTelemetry,
+  ): void {
+    this.emitProgress({
+      stage: "agent",
+      state,
+      message,
+      artifactIndex: input.artifactIndex,
+      artifactCount: input.artifactCount,
+      artifactUrl: input.artifact.url,
+      chunkIndex: input.chunkIndex + 1,
+      chunkCount: input.totalChunks,
+      agent,
+      ...(telemetry !== undefined ? { estimatedOutputTokens: telemetry.estimatedOutputTokens } : {}),
+      ...(telemetry?.outputTokens !== undefined ? { outputTokens: telemetry.outputTokens } : {}),
+      ...(telemetry?.tokensPerSecond !== undefined ? { tokensPerSecond: telemetry.tokensPerSecond } : {}),
+    });
+  }
+
   private async runMemoAgent(
     agent: Exclude<SwarmAgentName, "synthesizer">,
-    input: {
-      pageUrl: string;
-      artifact: FormattedArtifact;
-      chunk: string;
-      chunkIndex: number;
-      totalChunks: number;
-      artifactIndex: number;
-      artifactCount: number;
-    },
+    input: ChunkTaskInput,
     memory: Partial<Record<SwarmAgentName, unknown>>,
     retrievedContext: string[],
   ): Promise<{ object: AgentMemo; telemetry: StreamedObjectTelemetry }> {
     return generateObjectFromStream({
       model: this.providerClient.getModel(),
       system: getSwarmAgentPrompt(agent),
-      prompt: createPromptEnvelope({
-        pageUrl: input.pageUrl,
-        artifact: input.artifact,
-        chunk: input.chunk,
-        chunkIndex: input.chunkIndex,
-        totalChunks: input.totalChunks,
-        memory,
-        retrievedContext,
-      }),
+      prompt: createPromptEnvelope({ ...input, memory, retrievedContext }),
       schema: agentMemoSchema,
       contract: [
         "JSON contract:",
         '{"role":"string","summary":"string","observations":["string"],"evidence":["string"],"nextQuestions":["string"]}',
       ].join("\n"),
+      attempts: 4,
       maxRetries: 2,
-      providerOptions: {
-        openai: {
-          store: false,
-        },
-      },
-      onProgress: (telemetry) => {
-        this.emitProgress({
-          stage: "agent",
-          state: "streaming",
-          message: `${agent} agent streaming ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(telemetry)}`,
-          artifactIndex: input.artifactIndex,
-          artifactCount: input.artifactCount,
-          artifactUrl: input.artifact.url,
-          chunkIndex: input.chunkIndex + 1,
-          chunkCount: input.totalChunks,
+      providerOptions: { openai: { store: false } },
+      onRetry: (attempt, error) =>
+        this.emitAgentEvent(
+          "streaming",
           agent,
-          estimatedOutputTokens: telemetry.estimatedOutputTokens,
-          ...(telemetry.outputTokens !== undefined ? { outputTokens: telemetry.outputTokens } : {}),
-          ...(telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: telemetry.tokensPerSecond } : {}),
-        });
-      },
+          input,
+          `${agent} agent retry ${attempt}/4 ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}: ${error.message}`,
+        ),
+      onProgress: (telemetry) =>
+        this.emitAgentEvent(
+          "streaming",
+          agent,
+          input,
+          `${agent} agent streaming ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(telemetry)}`,
+          telemetry,
+        ),
     });
   }
 
   private async runSynthesisAgent(
-    input: {
-      pageUrl: string;
-      artifact: FormattedArtifact;
-      chunk: string;
-      chunkIndex: number;
-      totalChunks: number;
-      artifactIndex: number;
-      artifactCount: number;
-    },
+    input: ChunkTaskInput,
     memory: Partial<Record<SwarmAgentName, unknown>>,
     retrievedContext: string[],
   ): Promise<{ object: ChunkAnalysis; telemetry: StreamedObjectTelemetry }> {
     return generateObjectFromStream({
       model: this.providerClient.getModel(),
       system: getSwarmAgentPrompt("synthesizer"),
-      prompt: createPromptEnvelope({
-        pageUrl: input.pageUrl,
-        artifact: input.artifact,
-        chunk: input.chunk,
-        chunkIndex: input.chunkIndex,
-        totalChunks: input.totalChunks,
-        memory,
-        retrievedContext,
-      }),
+      prompt: createPromptEnvelope({ ...input, memory, retrievedContext }),
       schema: chunkAnalysisSchema,
       contract: [
         "JSON contract:",
         '{"entryPoints":[{"symbol":"string","description":"string","evidence":"string"}],"initializationFlow":["string"],"callGraph":[{"caller":"string","callee":"string","rationale":"string"}],"restoredNames":[{"originalName":"string","suggestedName":"string","justification":"string"}],"summary":"string","notableLibraries":["string"],"investigationTips":["string"],"risks":["string"]}',
       ].join("\n"),
+      attempts: 4,
       maxRetries: 2,
-      providerOptions: {
-        openai: {
-          store: false,
-        },
-      },
-      onProgress: (telemetry) => {
-        this.emitProgress({
-          stage: "agent",
-          state: "streaming",
-          message: `synthesizer agent streaming ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(telemetry)}`,
-          artifactIndex: input.artifactIndex,
-          artifactCount: input.artifactCount,
-          artifactUrl: input.artifact.url,
-          chunkIndex: input.chunkIndex + 1,
-          chunkCount: input.totalChunks,
-          agent: "synthesizer",
-          estimatedOutputTokens: telemetry.estimatedOutputTokens,
-          ...(telemetry.outputTokens !== undefined ? { outputTokens: telemetry.outputTokens } : {}),
-          ...(telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: telemetry.tokensPerSecond } : {}),
-        });
-      },
+      providerOptions: { openai: { store: false } },
+      onRetry: (attempt, error) =>
+        this.emitAgentEvent(
+          "streaming",
+          "synthesizer",
+          input,
+          `synthesizer agent retry ${attempt}/4 ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}: ${error.message}`,
+        ),
+      onProgress: (telemetry) =>
+        this.emitAgentEvent(
+          "streaming",
+          "synthesizer",
+          input,
+          `synthesizer agent streaming ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}${formatAgentTelemetrySuffix(telemetry)}`,
+          telemetry,
+        ),
     });
   }
 
@@ -474,27 +338,15 @@ export class AiBundleAnalyzer {
           "You are the lead synthesis agent for the final report.",
           "Merge artifact summaries and chunk analyses into a coherent site-level reverse-engineering map with the strongest evidence available.",
         ].join(" "),
-        prompt: [
-          `Target page: ${pageUrl}`,
-          "Artifact summaries:",
-          JSON.stringify(artifactSummaries, null, 2),
-          "Chunk analyses:",
-          JSON.stringify(chunkAnalyses, null, 2),
-        ].join("\n\n"),
-        schema: finalAnalysisSchema.omit({
-          artifactSummaries: true,
-          analyzedChunkCount: true,
-        }),
+        prompt: [`Target page: ${pageUrl}`, "Artifact summaries:", JSON.stringify(artifactSummaries, null, 2), "Chunk analyses:", JSON.stringify(chunkAnalyses, null, 2)].join("\n\n"),
+        schema: finalAnalysisSchema.omit({ artifactSummaries: true, analyzedChunkCount: true }),
         contract: [
           "JSON contract:",
           '{"overview":"string","entryPoints":[{"symbol":"string","description":"string","evidence":"string"}],"initializationFlow":["string"],"callGraph":[{"caller":"string","callee":"string","rationale":"string"}],"restoredNames":[{"originalName":"string","suggestedName":"string","justification":"string"}],"notableLibraries":["string"],"investigationTips":["string"],"risks":["string"]}',
         ].join("\n"),
+        attempts: 4,
         maxRetries: 2,
-        providerOptions: {
-          openai: {
-            store: false,
-          },
-        },
+        providerOptions: { openai: { store: false } },
       });
 
       return finalAnalysisSchema.parse({
@@ -517,11 +369,7 @@ export class AiBundleAnalyzer {
 
   private getRetrievedContext(
     agent: SwarmAgentName,
-    input: {
-      artifact: FormattedArtifact;
-      chunk: string;
-      localRag: LocalArtifactRag | null;
-    },
+    input: Pick<ChunkTaskInput, "artifact" | "chunk" | "localRag">,
     memory: Partial<Record<SwarmAgentName, unknown>>,
   ): string[] {
     if (!input.localRag) {
@@ -536,10 +384,7 @@ export class AiBundleAnalyzer {
       synthesizer: "entry points call graph restored names investigation tips risks runtime relationships architecture summary",
     };
 
-    const memoryText = Object.values(memory)
-      .map((entry) => JSON.stringify(entry))
-      .join(" ");
-
+    const memoryText = Object.values(memory).map((entry) => JSON.stringify(entry)).join(" ");
     return input.localRag.query({
       artifactUrl: input.artifact.url,
       query: `${agentKeywords[agent]} ${input.chunk} ${memoryText}`.slice(0, 6000),

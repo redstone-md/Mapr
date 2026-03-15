@@ -120,17 +120,55 @@ export async function generateObjectFromStream<TOutput>(input: {
   prompt: string;
   schema: z.ZodType<TOutput>;
   contract: string;
+  attempts?: number;
   maxRetries?: number;
   providerOptions?: Record<string, unknown>;
   onProgress?: (telemetry: StreamedObjectTelemetry) => void;
+  onRetry?: (attempt: number, error: Error) => void;
 }): Promise<StreamedObjectResult<TOutput>> {
+  const attempts = Math.max(1, Math.floor(input.attempts ?? 3));
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await streamSingleObjectAttempt(input, attempt);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Streaming object generation failed.");
+      if (attempt >= attempts) {
+        throw lastError;
+      }
+
+      input.onRetry?.(attempt + 1, lastError);
+    }
+  }
+
+  throw lastError ?? new Error("Streaming object generation failed.");
+}
+
+async function streamSingleObjectAttempt<TOutput>(
+  input: {
+    model: unknown;
+    system: string;
+    prompt: string;
+    schema: z.ZodType<TOutput>;
+    contract: string;
+    maxRetries?: number;
+    providerOptions?: Record<string, unknown>;
+    onProgress?: (telemetry: StreamedObjectTelemetry) => void;
+  },
+  attempt: number,
+): Promise<StreamedObjectResult<TOutput>> {
   let streamedText = "";
   const startedAt = Date.now();
   let lastProgressAt = 0;
+  const repairHint =
+    attempt > 1
+      ? "\nPrevious attempt failed because the JSON was malformed or incomplete. Return a syntactically valid JSON object this time."
+      : "";
 
   const result = streamText({
     model: input.model as never,
-    system: formatJsonSystemPrompt(input.system, input.contract),
+    system: `${formatJsonSystemPrompt(input.system, input.contract)}${repairHint}`,
     prompt: input.prompt,
     maxRetries: input.maxRetries ?? 2,
     ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions as never } : {}),
@@ -158,6 +196,7 @@ export async function generateObjectFromStream<TOutput>(input: {
   } catch {
     usage = undefined;
   }
+
   const elapsedMs = Date.now() - startedAt;
   const estimatedOutputTokens = estimateTokenCountFromText(streamedText);
   const outputTokens = usage?.outputTokens ?? undefined;

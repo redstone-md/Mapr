@@ -19,6 +19,7 @@ const rawCliArgsSchema = z.object({
   baseURL: z.string().url().optional(),
   model: z.string().min(1).optional(),
   contextSize: z.number().int().positive().optional(),
+  analysisConcurrency: z.number().int().positive().optional(),
   maxPages: z.number().int().positive().optional(),
   maxArtifacts: z.number().int().positive().optional(),
   maxDepth: z.number().int().nonnegative().optional(),
@@ -58,13 +59,14 @@ const optionMap = new Map<string, keyof CliArgs>([
   ["--base-url", "baseURL"],
   ["--model", "model"],
   ["--context-size", "contextSize"],
+  ["--analysis-concurrency", "analysisConcurrency"],
   ["--max-pages", "maxPages"],
   ["--max-artifacts", "maxArtifacts"],
   ["--max-depth", "maxDepth"],
 ]);
 
 const booleanKeys = new Set<keyof CliArgs>(["help", "version", "headless", "reconfigure", "listModels", "localRag", "verboseAgents"]);
-const numberKeys = new Set<keyof CliArgs>(["contextSize", "maxPages", "maxArtifacts", "maxDepth"]);
+const numberKeys = new Set<keyof CliArgs>(["contextSize", "analysisConcurrency", "maxPages", "maxArtifacts", "maxDepth"]);
 
 function normalizeValue(key: keyof CliArgs, value: string): unknown {
   if (numberKeys.has(key)) {
@@ -154,6 +156,7 @@ export function renderHelpText(): string {
     "  --base-url <url>                Base URL for the provider",
     "  --model <id>                    Model identifier",
     "  --context-size <tokens>         Model context window, for example 128000 or 512000",
+    "  --analysis-concurrency <n>      Parallel chunk analyses per artifact",
     "  --list-models                   Fetch and print models using the resolved provider config",
     "  --local-rag                     Enable local lexical RAG for oversized artifacts",
     "  --reconfigure                   Force interactive provider reconfiguration",
