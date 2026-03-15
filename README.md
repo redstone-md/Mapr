@@ -78,6 +78,14 @@ npx @redstone-md/mapr --help
 - `onlysq` -> `https://api.onlysq.ru/ai/openai`
 - `custom` -> any other OpenAI-compatible endpoint
 
+## OpenAI Auth Modes
+
+- `API key` uses the standard OpenAI API at `https://api.openai.com/v1`
+- `Use existing Codex CLI auth` reuses the local `codex login` browser session from `~/.codex/auth.json`
+- Codex CLI auth automatically switches OpenAI requests to `https://chatgpt.com/backend-api/codex`
+- When the local Codex access token expires, Mapr refreshes it through the official OpenAI refresh-token flow before retrying the request
+- If Codex CLI auth is missing, run `codex login` first and then re-run Mapr
+
 ## Usage
 
 Interactive:
@@ -104,6 +112,17 @@ List models with detected context sizes when available:
 
 ```bash
 npx @redstone-md/mapr --list-models --headless --provider-preset nvidia-nim --api-key secret
+```
+
+List models through an existing Codex CLI login:
+
+```bash
+npx @redstone-md/mapr \
+  --headless \
+  --list-models \
+  --provider-type openai \
+  --auth-method codex-cli \
+  --codex-home ~/.codex
 ```
 
 Useful flags:
