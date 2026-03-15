@@ -10,9 +10,13 @@ import {
   DEFAULT_MODEL_CONTEXT_SIZE,
   DEFAULT_OPENAI_BASE_URL,
   aiProviderConfigSchema,
+  findKnownModelInfo,
   getOpenAiCompatibleProviderPresets,
   getProviderPreset,
   inferProviderPreset,
+  inferCodexMode,
+  isCodexModel,
+  resolveCodexModelForMode,
   type AiProviderConfig,
   type ProviderModelInfo,
 } from "./provider";
@@ -101,7 +105,13 @@ function normalizePersistedConfig(config: PersistedConfig | null): ConfigDraft |
 }
 
 function formatModelOptionLabel(model: ProviderModelInfo): string {
-  return model.contextSize ? `${model.id} (${model.contextSize.toLocaleString()} tokens)` : model.id;
+  const title = model.label ?? model.id;
+  const suffixes = [
+    model.contextSize ? `${model.contextSize.toLocaleString()} tokens` : undefined,
+    model.usageLimitsNote ? "5h + 1w ChatGPT limit" : undefined,
+  ].filter((value): value is string => value !== undefined);
+
+  return suffixes.length > 0 ? `${title} (${suffixes.join(", ")})` : title;
 }
 
 async function promptForModel(
@@ -221,6 +231,19 @@ async function promptForContextSize(defaultValue: number): Promise<number> {
   );
 
   return z.coerce.number().int().positive().parse(rawValue);
+}
+
+async function promptForCodexMode(initialMode: "fast" | "reasoning" | undefined): Promise<"fast" | "reasoning"> {
+  return exitIfCancelled(
+    await select({
+      message: "Codex mode",
+      initialValue: initialMode ?? "reasoning",
+      options: [
+        { value: "fast", label: "Fast", hint: "Prefer mini / lower-latency Codex variant" },
+        { value: "reasoning", label: "Reasoning", hint: "Prefer max / deeper reasoning Codex variant" },
+      ],
+    }),
+  ) as "fast" | "reasoning";
 }
 
 export type AppConfig = AiProviderConfig;
@@ -428,7 +451,19 @@ export class ConfigManager {
       existingConfig?.providerType === providerType ? existingConfig.model : undefined,
     );
 
-    const modelContextSize = model.contextSize ?? (await promptForContextSize(existingConfig?.modelContextSize ?? DEFAULT_MODEL_CONTEXT_SIZE));
+    const finalModel =
+      providerType === "openai" && isCodexModel(model.id)
+        ? await (async () => {
+            const codexMode = await promptForCodexMode(
+              inferCodexMode(existingConfig?.model ?? model.id) ?? inferCodexMode(model.id) ?? "reasoning",
+            );
+            const resolvedModelId = resolveCodexModelForMode(model.id, codexMode);
+            return findKnownModelInfo(resolvedModelId) ?? { id: resolvedModelId };
+          })()
+        : model;
+
+    const modelContextSize =
+      finalModel.contextSize ?? (await promptForContextSize(existingConfig?.modelContextSize ?? DEFAULT_MODEL_CONTEXT_SIZE));
 
     return aiProviderConfigSchema.parse({
       providerType,
@@ -436,7 +471,7 @@ export class ConfigManager {
       providerName,
       baseURL,
       apiKey,
-      model: model.id,
+      model: finalModel.id,
       modelContextSize,
     });
   }

@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { AiProviderClient, extractContextWindowFromMetadata, inferProviderPreset } from "../lib/provider";
+import {
+  AiProviderClient,
+  extractContextWindowFromMetadata,
+  findKnownModelInfo,
+  inferCodexMode,
+  inferProviderPreset,
+  resolveCodexModelForMode,
+} from "../lib/provider";
 
 describe("AiProviderClient", () => {
   test("fetches model ids from an OpenAI-compatible models endpoint", async () => {
@@ -103,5 +110,13 @@ describe("provider metadata helpers", () => {
       }),
     ).toBe(512000);
     expect(extractContextWindowFromMetadata({ tags: ["thinking", "context 128k"] })).toBe(128000);
+  });
+
+  test("resolves codex mode variants and exposes known limits", () => {
+    expect(resolveCodexModelForMode("gpt-5.1-codex-max", "fast")).toBe("gpt-5.1-codex-mini");
+    expect(resolveCodexModelForMode("gpt-5.1-codex-mini", "reasoning")).toBe("gpt-5.1-codex-max");
+    expect(inferCodexMode("gpt-5.1-codex-mini")).toBe("fast");
+    expect(inferCodexMode("gpt-5.1-codex-max")).toBe("reasoning");
+    expect(findKnownModelInfo("gpt-5.1-codex-max")?.usageLimitsNote).toContain("5h");
   });
 });

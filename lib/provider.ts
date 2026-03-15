@@ -20,7 +20,39 @@ export interface ProviderPreset {
 export interface ProviderModelInfo {
   id: string;
   contextSize?: number;
+  label?: string;
+  usageLimitsNote?: string;
 }
+
+const openAiCuratedModels: ProviderModelInfo[] = [
+  {
+    id: "gpt-5.1-codex-max",
+    contextSize: 400000,
+    label: "ChatGPT Codex Max",
+    usageLimitsNote: "ChatGPT Codex plans use a 5h window with a shared weekly limit.",
+  },
+  {
+    id: "gpt-5.1-codex-mini",
+    contextSize: 200000,
+    label: "ChatGPT Codex Mini",
+    usageLimitsNote: "ChatGPT Codex plans use a 5h window with a shared weekly limit.",
+  },
+  {
+    id: "gpt-5.1-codex",
+    contextSize: 400000,
+    label: "GPT-5.1 Codex",
+  },
+  {
+    id: "gpt-5-codex",
+    contextSize: 400000,
+    label: "GPT-5 Codex",
+  },
+  {
+    id: "codex-mini-latest",
+    contextSize: 200000,
+    label: "codex-mini-latest",
+  },
+];
 
 const openAiCompatiblePresetDefinitions: ProviderPreset[] = [
   {
@@ -261,6 +293,31 @@ function resolveModelCatalogEndpoint(config: AiProviderConfig): string {
   return new URL("models", `${normalizeBaseUrl(config.baseURL)}/`).toString();
 }
 
+function mergeModelCatalog(baseCatalog: ProviderModelInfo[], extraCatalog: ProviderModelInfo[]): ProviderModelInfo[] {
+  const merged = new Map<string, ProviderModelInfo>();
+
+  for (const model of [...baseCatalog, ...extraCatalog]) {
+    const existing = merged.get(model.id);
+    if (!existing) {
+      merged.set(model.id, model);
+      continue;
+    }
+
+    merged.set(model.id, {
+      id: model.id,
+      ...(existing.contextSize ?? model.contextSize) !== undefined
+        ? { contextSize: existing.contextSize ?? model.contextSize }
+        : {},
+      ...(existing.label ?? model.label) !== undefined ? { label: existing.label ?? model.label } : {},
+      ...(existing.usageLimitsNote ?? model.usageLimitsNote) !== undefined
+        ? { usageLimitsNote: existing.usageLimitsNote ?? model.usageLimitsNote }
+        : {},
+    });
+  }
+
+  return [...merged.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
 export function getProviderPreset(presetId: z.infer<typeof providerPresetSchema>): ProviderPreset {
   if (presetId === "custom") {
     return {
@@ -292,6 +349,45 @@ export function inferProviderPreset(baseURL: string, providerType: z.infer<typeo
   }
 
   return resolvePresetByBaseUrl(baseURL)?.id;
+}
+
+export function getOpenAiCuratedModels(): ProviderModelInfo[] {
+  return openAiCuratedModels.map((model) => ({ ...model }));
+}
+
+export function findKnownModelInfo(modelId: string): ProviderModelInfo | undefined {
+  return openAiCuratedModels.find((model) => model.id === modelId);
+}
+
+export function isCodexModel(modelId: string): boolean {
+  const normalizedModelId = modelId.toLowerCase();
+  return normalizedModelId.includes("codex");
+}
+
+export function inferCodexMode(modelId: string): "fast" | "reasoning" | undefined {
+  const normalizedModelId = modelId.toLowerCase();
+  if (!isCodexModel(normalizedModelId)) {
+    return undefined;
+  }
+
+  if (normalizedModelId.includes("mini")) {
+    return "fast";
+  }
+
+  return "reasoning";
+}
+
+export function resolveCodexModelForMode(modelId: string, mode: "fast" | "reasoning"): string {
+  const normalizedModelId = modelId.toLowerCase();
+  if (normalizedModelId.includes("gpt-5.1-codex")) {
+    return mode === "fast" ? "gpt-5.1-codex-mini" : "gpt-5.1-codex-max";
+  }
+
+  if (normalizedModelId.includes("codex")) {
+    return mode === "fast" ? "codex-mini-latest" : "gpt-5-codex";
+  }
+
+  return modelId;
 }
 
 export function extractContextWindowFromMetadata(value: unknown): number | undefined {
@@ -371,8 +467,9 @@ export class AiProviderClient {
       })
       .filter((entry): entry is ProviderModelInfo => entry !== null);
 
-    return [...new Map(catalog.map((entry) => [entry.id, entry])).values()].sort((left, right) =>
-      left.id.localeCompare(right.id),
-    );
+    const deduplicatedCatalog = [...new Map(catalog.map((entry) => [entry.id, entry])).values()];
+    return this.config.providerType === "openai"
+      ? mergeModelCatalog(deduplicatedCatalog, getOpenAiCuratedModels())
+      : deduplicatedCatalog.sort((left, right) => left.id.localeCompare(right.id));
   }
 }
