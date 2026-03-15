@@ -11,6 +11,7 @@ import {
   type ArtifactCandidate,
   type DiscoveredArtifact,
 } from "./artifacts";
+import { isAuthLikePathname } from "./url-patterns";
 import { WasmModuleSummarizer } from "./wasm";
 
 const MAPR_USER_AGENT = "mapr";
@@ -436,11 +437,15 @@ export class BundleScraper {
       }
 
       const discoveredFrom = candidate.discoveredFrom.toLowerCase();
-      if (discoveredFrom.includes("iframe") || discoveredFrom.includes("form")) {
+      if (discoveredFrom.includes("iframe")) {
         return true;
       }
 
       const candidatePath = new URL(candidate.url).pathname.toLowerCase();
+      if (discoveredFrom.includes("form")) {
+        return isAuthLikePathname(candidatePath);
+      }
+
       if (candidatePath === entryPath) {
         return true;
       }

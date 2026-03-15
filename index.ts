@@ -4,6 +4,7 @@ import { cancel, confirm, intro, isCancel, log, outro, select, spinner, text } f
 import pc from "picocolors";
 import packageJson from "./package.json";
 
+import { estimateAgentTaskCount } from "./lib/analysis-planner";
 import { buildAnalysisSnapshot, PartialAnalysisError } from "./lib/analysis-schema";
 import { AiBundleAnalyzer, chunkTextByBytes, deriveChunkSizeBytes } from "./lib/ai-analyzer";
 import { getConfigOverrides, parseCliArgs, renderHelpText } from "./lib/cli-args";
@@ -13,7 +14,6 @@ import { renderAdaptiveAnalysisProgressLine, renderProgressBar } from "./lib/pro
 import { findKnownModelInfo, isCodexModel } from "./lib/provider";
 import { ReportWriter } from "./lib/reporter";
 import { BundleScraper } from "./lib/scraper";
-import { SWARM_AGENT_ORDER } from "./lib/swarm-prompts";
 
 process.env.AI_SDK_LOG_WARNINGS = "false";
 (globalThis as typeof globalThis & { AI_SDK_LOG_WARNINGS?: boolean }).AI_SDK_LOG_WARNINGS = false;
@@ -176,7 +176,11 @@ async function run(): Promise<void> {
     0,
   );
   const analysisConcurrency = await resolveAnalysisConcurrency(headless, args.analysisConcurrency, totalChunks);
-  const totalAgentTasks = Math.max(1, totalChunks * SWARM_AGENT_ORDER.length);
+  const totalAgentTasks = estimateAgentTaskCount(
+    scrapeResult.pageUrl,
+    formattedArtifacts,
+    (artifact) => chunkTextByBytes(artifact.formattedContent || artifact.content, deriveChunkSizeBytes(config.modelContextSize)).length,
+  );
   let completedAgentTasks = 0;
   const analysisStartedAt = Date.now();
 

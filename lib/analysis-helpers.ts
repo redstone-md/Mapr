@@ -12,6 +12,7 @@ export function createPromptEnvelope(input: {
   chunk: string;
   chunkIndex: number;
   totalChunks: number;
+  artifactPrimer?: string;
   memory?: unknown;
   retrievedContext?: string[];
 }): string {
@@ -22,6 +23,7 @@ export function createPromptEnvelope(input: {
     `Discovered from: ${input.artifact.discoveredFrom}`,
     `Chunk ${input.chunkIndex + 1} of ${input.totalChunks}`,
     input.artifact.formattingNote ? `Formatting note: ${input.artifact.formattingNote}` : "Formatting note: none",
+    input.artifactPrimer ? `Artifact primer from earlier chunk(s):\n${input.artifactPrimer}` : "Artifact primer from earlier chunk(s): none",
     input.memory ? `Swarm memory:\n${JSON.stringify(input.memory, null, 2)}` : "Swarm memory: none yet",
     input.retrievedContext && input.retrievedContext.length > 0
       ? `Local RAG evidence:\n${input.retrievedContext.map((segment, index) => `Segment ${index + 1}:\n${segment}`).join("\n\n")}`

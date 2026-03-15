@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { buildArtifactAnalysisPlan, getAgentPlanForChunk, orderArtifactsForAnalysis } from "./analysis-planner";
 import type { AgentMemo, ArtifactSummary, BundleAnalysis, ChunkAnalysis } from "./analysis-schema";
 import {
   agentMemoSchema,
@@ -22,7 +23,7 @@ import type { FormattedArtifact } from "./formatter";
 import { LocalArtifactRag } from "./local-rag";
 import { mapWithConcurrency } from "./promise-pool";
 import { AiProviderClient, type AiProviderConfig } from "./provider";
-import { getGlobalMissionPrompt, getSwarmAgentPrompt, SWARM_AGENT_ORDER, type SwarmAgentName } from "./swarm-prompts";
+import { getGlobalMissionPrompt, getSwarmAgentPrompt, type SwarmAgentName } from "./swarm-prompts";
 
 const analyzeInputSchema = z.object({
   pageUrl: z.string().url(),
@@ -75,6 +76,7 @@ interface ChunkTaskInput {
   artifactIndex: number;
   artifactCount: number;
   localRag: LocalArtifactRag | null;
+  artifactPrimer?: string;
 }
 
 export { chunkTextByBytes, deriveChunkSizeBytes } from "./analysis-helpers";
@@ -117,41 +119,76 @@ export class AiBundleAnalyzer {
     const chunkAnalyses: ChunkAnalysis[] = [];
     const artifactSummaries: ArtifactSummary[] = [];
     const localRag = this.localRagEnabled ? new LocalArtifactRag(validatedInput.artifacts) : null;
+    const prioritizedArtifacts = orderArtifactsForAnalysis(validatedInput.pageUrl, validatedInput.artifacts);
 
-    for (let artifactIndex = 0; artifactIndex < validatedInput.artifacts.length; artifactIndex += 1) {
-      const artifact = validatedInput.artifacts[artifactIndex]!;
+    for (let artifactIndex = 0; artifactIndex < prioritizedArtifacts.length; artifactIndex += 1) {
+      const artifact = prioritizedArtifacts[artifactIndex]!;
+      const artifactPlan = buildArtifactAnalysisPlan(validatedInput.pageUrl, artifact);
       const chunks = chunkTextByBytes(artifact.formattedContent || artifact.content, this.chunkSizeBytes);
+      const perArtifactChunkAnalyses: ChunkAnalysis[] = [];
 
       this.emitProgress({
         stage: "artifact",
         state: "started",
-        message: `Starting swarm analysis for artifact ${artifactIndex + 1}/${validatedInput.artifacts.length}: ${artifact.url}`,
+        message: `Starting ${artifactPlan.priority}-priority swarm analysis for artifact ${artifactIndex + 1}/${prioritizedArtifacts.length}: ${artifact.url}`,
         artifactIndex: artifactIndex + 1,
-        artifactCount: validatedInput.artifacts.length,
+        artifactCount: prioritizedArtifacts.length,
         artifactUrl: artifact.url,
       });
 
-      const perArtifactChunkAnalyses = await mapWithConcurrency(
-        chunks,
-        this.analysisConcurrency,
-        async (chunk, chunkIndex): Promise<ChunkAnalysis> => {
-          const chunkInput: ChunkTaskInput = {
-            pageUrl: validatedInput.pageUrl,
-            artifact,
-            chunk,
-            chunkIndex,
-            totalChunks: chunks.length,
-            artifactIndex: artifactIndex + 1,
-            artifactCount: validatedInput.artifacts.length,
-            localRag,
-          };
+      if (chunks.length > 0) {
+        const firstChunkInput: ChunkTaskInput = {
+          pageUrl: validatedInput.pageUrl,
+          artifact,
+          chunk: chunks[0]!,
+          chunkIndex: 0,
+          totalChunks: chunks.length,
+          artifactIndex: artifactIndex + 1,
+          artifactCount: prioritizedArtifacts.length,
+          localRag,
+        };
 
-          this.emitChunkEvent("started", chunkInput);
-          const analysis = await this.analyzeChunkWithSwarm(chunkInput);
-          this.emitChunkEvent("completed", chunkInput);
-          return analysis;
-        },
-      );
+        this.emitChunkEvent("started", firstChunkInput);
+        const firstChunkAnalysis = await this.analyzeChunkWithSwarm(firstChunkInput, getAgentPlanForChunk(artifactPlan, 0));
+        this.emitChunkEvent("completed", firstChunkInput);
+        perArtifactChunkAnalyses.push(firstChunkAnalysis);
+
+        const artifactPrimer = JSON.stringify({
+          priority: artifactPlan.priority,
+          firstChunkSummary: firstChunkAnalysis.summary,
+          entryPoints: firstChunkAnalysis.entryPoints,
+          notableLibraries: firstChunkAnalysis.notableLibraries,
+          risks: firstChunkAnalysis.risks,
+        });
+
+        if (chunks.length > 1) {
+          const remainingChunkAnalyses = await mapWithConcurrency(
+            chunks.slice(1),
+            this.analysisConcurrency,
+            async (chunk, offset): Promise<ChunkAnalysis> => {
+              const chunkIndex = offset + 1;
+              const chunkInput: ChunkTaskInput = {
+                pageUrl: validatedInput.pageUrl,
+                artifact,
+                chunk,
+                chunkIndex,
+                totalChunks: chunks.length,
+                artifactIndex: artifactIndex + 1,
+                artifactCount: prioritizedArtifacts.length,
+                localRag,
+                artifactPrimer,
+              };
+
+              this.emitChunkEvent("started", chunkInput);
+              const analysis = await this.analyzeChunkWithSwarm(chunkInput, getAgentPlanForChunk(artifactPlan, chunkIndex));
+              this.emitChunkEvent("completed", chunkInput);
+              return analysis;
+            },
+          );
+
+          perArtifactChunkAnalyses.push(...remainingChunkAnalyses);
+        }
+      }
 
       chunkAnalyses.push(...perArtifactChunkAnalyses);
       artifactSummaries.push({
@@ -164,9 +201,9 @@ export class AiBundleAnalyzer {
       this.emitProgress({
         stage: "artifact",
         state: "completed",
-        message: `Completed swarm analysis for artifact ${artifactIndex + 1}/${validatedInput.artifacts.length}: ${artifact.url}`,
+        message: `Completed ${artifactPlan.priority}-priority swarm analysis for artifact ${artifactIndex + 1}/${prioritizedArtifacts.length}: ${artifact.url}`,
         artifactIndex: artifactIndex + 1,
-        artifactCount: validatedInput.artifacts.length,
+        artifactCount: prioritizedArtifacts.length,
         artifactUrl: artifact.url,
       });
     }
@@ -187,10 +224,10 @@ export class AiBundleAnalyzer {
     });
   }
 
-  private async analyzeChunkWithSwarm(input: ChunkTaskInput): Promise<ChunkAnalysis> {
+  private async analyzeChunkWithSwarm(input: ChunkTaskInput, agentPlan: SwarmAgentName[]): Promise<ChunkAnalysis> {
     const memory: Partial<Record<SwarmAgentName, AgentMemo | ChunkAnalysis>> = {};
 
-    for (const agent of SWARM_AGENT_ORDER) {
+    for (const agent of agentPlan) {
       this.emitAgentEvent("started", agent, input, `${agent} agent running on ${input.artifact.url} chunk ${input.chunkIndex + 1}/${input.totalChunks}`);
 
       try {
