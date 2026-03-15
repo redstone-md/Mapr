@@ -37,6 +37,7 @@ const refreshResponseSchema = z
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type HeaderLike = Headers | Array<[string, string]> | Record<string, string>;
+type JsonRecord = Record<string, unknown>;
 
 export interface CodexCliAuthState {
   accessToken: string;
@@ -96,6 +97,83 @@ function mergeHeaders(input: HeaderLike | undefined, overrides: Record<string, s
     headers.set(key, value);
   }
   return headers;
+}
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isJsonRequest(headers: Headers): boolean {
+  const contentType = headers.get("content-type");
+  return contentType !== null && contentType.toLowerCase().includes("application/json");
+}
+
+function extractInstructionText(content: unknown): string | undefined {
+  if (typeof content === "string") {
+    const normalized = content.trim();
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+
+  const segments = content
+    .map((part) => {
+      if (isJsonRecord(part) && typeof part.text === "string") {
+        return part.text.trim();
+      }
+
+      return undefined;
+    })
+    .filter((segment): segment is string => typeof segment === "string" && segment.length > 0);
+
+  if (segments.length === 0) {
+    return undefined;
+  }
+
+  return segments.join("\n");
+}
+
+function rewriteCodexResponsesBody(bodyText: string): string {
+  const parsed = JSON.parse(bodyText) as unknown;
+  if (!isJsonRecord(parsed)) {
+    return bodyText;
+  }
+
+  const hasInstructions = typeof parsed.instructions === "string" && parsed.instructions.trim().length > 0;
+  if (hasInstructions || !Array.isArray(parsed.input)) {
+    return bodyText;
+  }
+
+  const instructionSegments: string[] = [];
+  const filteredInput = parsed.input.filter((entry) => {
+    if (!isJsonRecord(entry)) {
+      return true;
+    }
+
+    const role = typeof entry.role === "string" ? entry.role : undefined;
+    if (role !== "system" && role !== "developer") {
+      return true;
+    }
+
+    const instruction = extractInstructionText(entry.content);
+    if (instruction !== undefined) {
+      instructionSegments.push(instruction);
+    }
+
+    return false;
+  });
+
+  if (instructionSegments.length === 0) {
+    return bodyText;
+  }
+
+  return JSON.stringify({
+    ...parsed,
+    instructions: instructionSegments.join("\n\n"),
+    input: filteredInput,
+  });
 }
 
 export class CodexCliAuthManager {
@@ -174,9 +252,19 @@ export class CodexCliAuthManager {
           Authorization: `Bearer ${state.accessToken}`,
           "ChatGPT-Account-Id": state.accountId,
         });
+        const requestUrl = new URL(sourceRequest.url);
+        const isCodexResponsesRequest = requestUrl.pathname.endsWith("/responses");
+        const transformedBody =
+          requestBody !== undefined && isCodexResponsesRequest && isJsonRequest(headers)
+            ? rewriteCodexResponsesBody(new TextDecoder().decode(requestBody))
+            : requestBody;
         const request = new Request(sourceRequest, {
           headers,
-          ...(requestBody !== undefined ? { body: requestBody.slice(0) } : {}),
+          ...(typeof transformedBody === "string"
+            ? { body: transformedBody }
+            : transformedBody !== undefined
+              ? { body: transformedBody.slice(0) }
+              : {}),
         });
 
         const response = await baseFetch(request);

@@ -119,4 +119,66 @@ describe("CodexCliAuthManager", () => {
     expect(persisted.tokens.refresh_token).toBe("refresh-new");
     expect(persisted.tokens.access_token).toContain("QxMDI0NDQ4MD");
   });
+
+  test("injects instructions for ChatGPT Codex responses requests", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "mapr-codex-instructions-"));
+    createdDirectories.push(codexHome);
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      join(codexHome, "auth.json"),
+      JSON.stringify(
+        {
+          auth_mode: "chatgpt",
+          OPENAI_API_KEY: null,
+          tokens: {
+            id_token:
+              "eyJhbGciOiJIUzI1NiJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoib3JnX3Rlc3QiLCJjaGF0Z3B0X3BsYW5fdHlwZSI6InRlYW0ifX0.sig",
+            access_token:
+              "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJvcmdfdGVzdCJ9fQ.sig",
+            refresh_token: "refresh-current",
+            account_id: "org_test",
+          },
+          last_refresh: "2026-03-15T00:00:00.000Z",
+        },
+        null,
+        2,
+      ),
+    );
+
+    let outboundRequest: Request | undefined;
+    const manager = new CodexCliAuthManager({ codexHomePath: codexHome });
+    const authenticatedFetch = manager.createAuthenticatedFetch(async (input: string | URL | Request, init?: RequestInit) => {
+      outboundRequest = input instanceof Request ? input : new Request(String(input), init);
+      return new Response(JSON.stringify({ id: "resp_test" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    await authenticatedFetch("https://chatgpt.com/backend-api/codex/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-5.4",
+        input: [
+          { role: "developer", content: "Return strict JSON only." },
+          { role: "user", content: [{ type: "input_text", text: "Analyze this chunk." }] },
+        ],
+        store: false,
+        stream: true,
+      }),
+    });
+
+    const outboundBody = JSON.parse(await outboundRequest!.text()) as {
+      instructions?: string;
+      input: Array<{ role?: string; content?: unknown }>;
+    };
+
+    expect(outboundRequest?.headers.get("authorization")).toMatch(/^Bearer /);
+    expect(outboundRequest?.headers.get("chatgpt-account-id")).toBe("org_test");
+    expect(outboundBody.instructions).toBe("Return strict JSON only.");
+    expect(outboundBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Analyze this chunk." }] }]);
+  });
 });
