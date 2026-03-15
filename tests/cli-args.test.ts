@@ -25,6 +25,8 @@ describe("parseCliArgs", () => {
       "6",
       "--max-artifacts",
       "150",
+      "--max-depth",
+      "4",
     ]);
 
     expect(args.headless).toBe(true);
@@ -33,6 +35,7 @@ describe("parseCliArgs", () => {
     expect(args.localRag).toBe(true);
     expect(args.maxPages).toBe(6);
     expect(args.maxArtifacts).toBe(150);
+    expect(args.maxDepth).toBe(4);
   });
 
   test("builds config overrides without undefined fields", () => {
@@ -51,6 +54,25 @@ describe("parseCliArgs", () => {
       providerType: "openai-compatible",
       model: "qwen2.5-coder",
       modelContextSize: 512000,
+    });
+  });
+
+  test("expands provider preset defaults into config overrides", () => {
+    const overrides = getConfigOverrides(
+      parseCliArgs([
+        "--provider-preset",
+        "onlysq",
+        "--api-key",
+        "secret",
+      ]),
+    );
+
+    expect(overrides).toEqual({
+      providerType: "openai-compatible",
+      providerPreset: "onlysq",
+      providerName: "OnlySQ",
+      apiKey: "secret",
+      baseURL: "https://api.onlysq.ru/ai/openai",
     });
   });
 });

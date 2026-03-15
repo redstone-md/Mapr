@@ -10,12 +10,17 @@ import {
   DEFAULT_MODEL_CONTEXT_SIZE,
   DEFAULT_OPENAI_BASE_URL,
   aiProviderConfigSchema,
+  getOpenAiCompatibleProviderPresets,
+  getProviderPreset,
+  inferProviderPreset,
   type AiProviderConfig,
+  type ProviderModelInfo,
 } from "./provider";
 
 const persistedConfigSchema = z
   .object({
     providerType: z.enum(["openai", "openai-compatible"]).optional(),
+    providerPreset: z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]).optional(),
     providerName: z.string().min(1).optional(),
     apiKey: z.string().min(1).optional(),
     openAiApiKey: z.string().min(1).optional(),
@@ -28,6 +33,7 @@ const persistedConfigSchema = z
 const configDraftSchema = aiProviderConfigSchema.partial();
 const modelListingConfigSchema = z.object({
   providerType: z.enum(["openai", "openai-compatible"]).default("openai"),
+  providerPreset: z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]).optional(),
   providerName: z.string().min(1).default("OpenAI"),
   apiKey: z.string().min(1),
   baseURL: z.string().trim().url().default(DEFAULT_OPENAI_BASE_URL),
@@ -76,21 +82,33 @@ function normalizePersistedConfig(config: PersistedConfig | null): ConfigDraft |
     return null;
   }
 
+  const providerType = config.providerType ?? "openai";
+  const baseURL = config.baseURL ?? DEFAULT_OPENAI_BASE_URL;
+
   return configDraftSchema.parse({
-    providerType: config.providerType ?? "openai",
+    providerType,
+    providerPreset:
+      config.providerPreset ??
+      (config.providerType === "openai-compatible" || providerType === "openai-compatible"
+        ? inferProviderPreset(baseURL, providerType)
+        : undefined),
     providerName: config.providerName ?? "OpenAI",
     apiKey: config.apiKey ?? config.openAiApiKey,
-    baseURL: config.baseURL ?? DEFAULT_OPENAI_BASE_URL,
+    baseURL,
     model: config.model ?? DEFAULT_MODEL,
     modelContextSize: config.modelContextSize ?? DEFAULT_MODEL_CONTEXT_SIZE,
   });
+}
+
+function formatModelOptionLabel(model: ProviderModelInfo): string {
+  return model.contextSize ? `${model.id} (${model.contextSize.toLocaleString()} tokens)` : model.id;
 }
 
 async function promptForModel(
   config: Omit<AiProviderConfig, "model" | "modelContextSize">,
   fetcher: FetchLike,
   initialModel?: string,
-): Promise<string> {
+): Promise<ProviderModelInfo> {
   const providerClient = new AiProviderClient({
     ...config,
     model: initialModel ?? DEFAULT_MODEL,
@@ -98,8 +116,8 @@ async function promptForModel(
   });
 
   try {
-    const models = await providerClient.fetchModels(fetcher);
-    if (models.length === 0) {
+    const catalog = await providerClient.fetchModelCatalog(fetcher);
+    if (catalog.length === 0) {
       throw new Error("No models returned by the provider.");
     }
 
@@ -117,8 +135,8 @@ async function promptForModel(
       ).trim();
 
       currentSearch = searchTerm;
-      const filteredModels = models.filter((model) =>
-        searchTerm.length === 0 ? true : model.toLowerCase().includes(searchTerm.toLowerCase()),
+      const filteredModels = catalog.filter((model) =>
+        searchTerm.length === 0 ? true : model.id.toLowerCase().includes(searchTerm.toLowerCase()),
       );
       const visibleModels = filteredModels.slice(0, 15);
 
@@ -126,7 +144,7 @@ async function promptForModel(
         await select({
           message: "Select model",
           options: [
-            ...visibleModels.map((model) => ({ value: model, label: model })),
+            ...visibleModels.map((model) => ({ value: model.id, label: formatModelOptionLabel(model) })),
             { value: "__search_again__", label: "Search again" },
             { value: "__manual__", label: "Enter model manually" },
           ],
@@ -141,10 +159,35 @@ async function promptForModel(
         break;
       }
 
-      return z.string().min(1).parse(selectedModel);
+      const resolvedModel = catalog.find((model) => model.id === selectedModel);
+      if (resolvedModel) {
+        return resolvedModel;
+      }
     }
   } catch {
-    return z
+    return {
+      id: z
+        .string()
+        .trim()
+        .min(1, "Model is required.")
+        .parse(
+          exitIfCancelled(
+            await text({
+              message: "Enter model ID manually",
+              placeholder: DEFAULT_MODEL,
+              initialValue: initialModel ?? DEFAULT_MODEL,
+              validate(value) {
+                const parsed = z.string().trim().min(1).safeParse(value);
+                return parsed.success ? undefined : "Model is required.";
+              },
+            }),
+          ),
+        ),
+    };
+  }
+
+  return {
+    id: z
       .string()
       .trim()
       .min(1, "Model is required.")
@@ -160,26 +203,8 @@ async function promptForModel(
             },
           }),
         ),
-      );
-  }
-
-  return z
-    .string()
-    .trim()
-    .min(1, "Model is required.")
-    .parse(
-      exitIfCancelled(
-        await text({
-          message: "Enter model ID manually",
-          placeholder: DEFAULT_MODEL,
-          initialValue: initialModel ?? DEFAULT_MODEL,
-          validate(value) {
-            const parsed = z.string().trim().min(1).safeParse(value);
-            return parsed.success ? undefined : "Model is required.";
-          },
-        }),
       ),
-    );
+  };
 }
 
 async function promptForContextSize(defaultValue: number): Promise<number> {
@@ -285,13 +310,18 @@ export class ConfigManager {
   }
 
   public async listModels(config: ConfigDraft | null): Promise<string[]> {
+    const catalog = await this.listModelCatalog(config);
+    return catalog.map((entry) => entry.id);
+  }
+
+  public async listModelCatalog(config: ConfigDraft | null): Promise<ProviderModelInfo[]> {
     const resolvedConfig = modelListingConfigSchema.parse(config);
     const providerClient = new AiProviderClient({
       ...resolvedConfig,
       model: DEFAULT_MODEL,
       modelContextSize: DEFAULT_MODEL_CONTEXT_SIZE,
     });
-    return providerClient.fetchModels(this.fetcher);
+    return providerClient.fetchModelCatalog(this.fetcher);
   }
 
   public async resolveConfigDraft(overrides: ConfigDraft | null): Promise<ConfigDraft | null> {
@@ -311,6 +341,29 @@ export class ConfigManager {
       }),
     ) as AiProviderConfig["providerType"];
 
+    const existingPreset =
+      existingConfig?.providerPreset ??
+      (existingConfig?.baseURL && existingConfig.providerType === "openai-compatible"
+        ? inferProviderPreset(existingConfig.baseURL, "openai-compatible")
+        : undefined);
+
+    const providerPreset =
+      providerType === "openai"
+        ? undefined
+        : (exitIfCancelled(
+            await select({
+              message: "Choose provider preset",
+              initialValue: existingPreset ?? "custom",
+              options: getOpenAiCompatibleProviderPresets().map((preset) => ({
+                value: preset.id,
+                label: preset.label,
+              })),
+            }),
+          ) as NonNullable<AiProviderConfig["providerPreset"]>);
+
+    const presetDefinition =
+      providerType === "openai" ? undefined : getProviderPreset(providerPreset ?? "custom");
+
     const providerName =
       providerType === "openai"
         ? "OpenAI"
@@ -319,9 +372,12 @@ export class ConfigManager {
               await text({
                 message: "Provider display name",
                 placeholder: "Local vLLM, LM Studio, Ollama gateway",
-                initialValue: existingConfig?.providerName && existingConfig.providerType === "openai-compatible"
-                  ? existingConfig.providerName
-                  : "",
+                initialValue:
+                  existingConfig?.providerName &&
+                  existingConfig.providerType === "openai-compatible" &&
+                  existingPreset === providerPreset
+                    ? existingConfig.providerName
+                    : presetDefinition?.providerName ?? "",
                 validate(value) {
                   const parsed = z.string().trim().min(1).safeParse(value);
                   return parsed.success ? undefined : "Provider name is required.";
@@ -336,9 +392,9 @@ export class ConfigManager {
           message: providerType === "openai" ? "OpenAI base URL" : "OpenAI-compatible base URL",
           placeholder: DEFAULT_OPENAI_BASE_URL,
           initialValue:
-            existingConfig?.baseURL && existingConfig.providerType === providerType
+            existingConfig?.baseURL && existingConfig.providerType === providerType && existingPreset === providerPreset
               ? existingConfig.baseURL
-              : DEFAULT_OPENAI_BASE_URL,
+              : presetDefinition?.baseURL ?? DEFAULT_OPENAI_BASE_URL,
           validate(value) {
             const parsed = z.string().trim().url().safeParse(value);
             return parsed.success ? undefined : "Base URL must be a valid URL.";
@@ -363,6 +419,7 @@ export class ConfigManager {
     const model = await promptForModel(
       {
         providerType,
+        ...(providerPreset !== undefined ? { providerPreset } : {}),
         providerName,
         baseURL,
         apiKey,
@@ -371,14 +428,15 @@ export class ConfigManager {
       existingConfig?.providerType === providerType ? existingConfig.model : undefined,
     );
 
-    const modelContextSize = await promptForContextSize(existingConfig?.modelContextSize ?? DEFAULT_MODEL_CONTEXT_SIZE);
+    const modelContextSize = model.contextSize ?? (await promptForContextSize(existingConfig?.modelContextSize ?? DEFAULT_MODEL_CONTEXT_SIZE));
 
     return aiProviderConfigSchema.parse({
       providerType,
+      ...(providerPreset !== undefined ? { providerPreset } : {}),
       providerName,
       baseURL,
       apiKey,
-      model,
+      model: model.id,
       modelContextSize,
     });
   }

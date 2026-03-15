@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { providerTypeSchema } from "./provider";
+import { getProviderPreset, providerPresetSchema, providerTypeSchema } from "./provider";
 
 const rawCliArgsSchema = z.object({
   help: z.boolean().default(false),
@@ -13,6 +13,7 @@ const rawCliArgsSchema = z.object({
   url: z.string().url().optional(),
   output: z.string().min(1).optional(),
   providerType: providerTypeSchema.optional(),
+  providerPreset: providerPresetSchema.optional(),
   providerName: z.string().min(1).optional(),
   apiKey: z.string().min(1).optional(),
   baseURL: z.string().url().optional(),
@@ -20,11 +21,13 @@ const rawCliArgsSchema = z.object({
   contextSize: z.number().int().positive().optional(),
   maxPages: z.number().int().positive().optional(),
   maxArtifacts: z.number().int().positive().optional(),
+  maxDepth: z.number().int().nonnegative().optional(),
 });
 
 const cliConfigOverrideSchema = z
   .object({
     providerType: providerTypeSchema.optional(),
+    providerPreset: providerPresetSchema.optional(),
     providerName: z.string().min(1).optional(),
     apiKey: z.string().min(1).optional(),
     baseURL: z.string().url().optional(),
@@ -49,6 +52,7 @@ const optionMap = new Map<string, keyof CliArgs>([
   ["-u", "url"],
   ["--output", "output"],
   ["--provider-type", "providerType"],
+  ["--provider-preset", "providerPreset"],
   ["--provider-name", "providerName"],
   ["--api-key", "apiKey"],
   ["--base-url", "baseURL"],
@@ -56,10 +60,11 @@ const optionMap = new Map<string, keyof CliArgs>([
   ["--context-size", "contextSize"],
   ["--max-pages", "maxPages"],
   ["--max-artifacts", "maxArtifacts"],
+  ["--max-depth", "maxDepth"],
 ]);
 
 const booleanKeys = new Set<keyof CliArgs>(["help", "version", "headless", "reconfigure", "listModels", "localRag", "verboseAgents"]);
-const numberKeys = new Set<keyof CliArgs>(["contextSize", "maxPages", "maxArtifacts"]);
+const numberKeys = new Set<keyof CliArgs>(["contextSize", "maxPages", "maxArtifacts", "maxDepth"]);
 
 function normalizeValue(key: keyof CliArgs, value: string): unknown {
   if (numberKeys.has(key)) {
@@ -110,6 +115,13 @@ export function getConfigOverrides(args: CliArgs) {
   const overrides: Record<string, unknown> = {};
 
   if (args.providerType !== undefined) overrides.providerType = args.providerType;
+  if (args.providerPreset !== undefined) {
+    const preset = getProviderPreset(args.providerPreset);
+    overrides.providerType = "openai-compatible";
+    overrides.providerPreset = args.providerPreset;
+    overrides.providerName = args.providerName ?? preset.providerName;
+    overrides.baseURL = args.baseURL ?? preset.baseURL;
+  }
   if (args.providerName !== undefined) overrides.providerName = args.providerName;
   if (args.apiKey !== undefined) overrides.apiKey = args.apiKey;
   if (args.baseURL !== undefined) overrides.baseURL = args.baseURL;
@@ -132,9 +144,11 @@ export function renderHelpText(): string {
     "  --output <path>                 Write the report to a specific path",
     "  --max-pages <number>            Limit same-origin HTML pages to crawl",
     "  --max-artifacts <number>        Limit total downloaded artifacts",
+    "  --max-depth <number>            Limit crawl hop depth from the entry page",
     "",
     "Provider options:",
     "  --provider-type <type>          openai | openai-compatible",
+    "  --provider-preset <preset>      custom | blackbox | nvidia-nim | onlysq",
     "  --provider-name <name>          Display name for the provider",
     "  --api-key <key>                 Provider API key",
     "  --base-url <url>                Base URL for the provider",
