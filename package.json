@@ -52,6 +52,7 @@
     "@clack/prompts": "1.1.0",
     "ai": "6.0.116",
     "cheerio": "1.2.0",
+    "happy-dom": "^20.8.4",
     "picocolors": "1.1.1",
     "prettier": "3.8.1",
     "zod": "4.3.6"

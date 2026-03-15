@@ -191,6 +191,18 @@ describe("BundleScraper", () => {
         "https://example.com/embedded/login",
       ].sort(),
     );
+    expect(result.domSnapshots.find((snapshot) => snapshot.url === "https://example.com/")?.forms).toEqual([]);
+    expect(result.domSnapshots.find((snapshot) => snapshot.url === "https://example.com/")?.iframes).toEqual([
+      "https://example.com/embedded/login",
+    ]);
+    expect(result.domSnapshots.map((snapshot) => snapshot.url).sort()).toEqual(
+      [
+        "https://example.com/",
+        "https://example.com/dashboard",
+        "https://example.com/embedded/login",
+        "https://example.com/offers",
+      ].sort(),
+    );
     expect(result.artifacts.map((artifact) => artifact.type).sort()).toEqual(
       (["script", "script", "script", "script", "service-worker", "source-map", "wasm"] as const).slice().sort(),
     );
@@ -276,6 +288,9 @@ describe("BundleScraper", () => {
     expect(result.htmlPages.sort()).toEqual(
       ["https://example.com/login.html", "https://example.com/embedded/login-frame.html"].sort(),
     );
+    expect(result.domSnapshots.find((snapshot) => snapshot.url === "https://example.com/login.html")?.iframes).toEqual([
+      "https://example.com/embedded/login-frame.html",
+    ]);
     expect(result.scriptUrls.sort()).toEqual(
       [
         "https://example.com/assets/login.js",

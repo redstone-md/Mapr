@@ -19,6 +19,7 @@ import {
 } from "./analysis-helpers";
 import { generateObjectFromStream, type StreamedObjectTelemetry } from "./ai-json";
 import { artifactTypeSchema } from "./artifacts";
+import { domPageSnapshotSchema, type DomPageSnapshot } from "./dom-snapshot";
 import type { FormattedArtifact } from "./formatter";
 import { LocalArtifactRag } from "./local-rag";
 import { mapWithConcurrency } from "./promise-pool";
@@ -27,6 +28,7 @@ import { getGlobalMissionPrompt, getSwarmAgentPrompt, type SwarmAgentName } from
 
 const analyzeInputSchema = z.object({
   pageUrl: z.string().url(),
+  domSnapshots: z.array(domPageSnapshotSchema).default([]),
   artifacts: z.array(
     z.object({
       url: z.string().url(),
@@ -98,7 +100,7 @@ export class AiBundleAnalyzer {
     this.onProgress = options.onProgress;
   }
 
-  public async analyze(input: { pageUrl: string; artifacts: FormattedArtifact[] }): Promise<BundleAnalysis> {
+  public async analyze(input: { pageUrl: string; domSnapshots?: DomPageSnapshot[]; artifacts: FormattedArtifact[] }): Promise<BundleAnalysis> {
     const validatedInput = analyzeInputSchema.parse(input);
 
     if (validatedInput.artifacts.length === 0) {
@@ -208,7 +210,7 @@ export class AiBundleAnalyzer {
       });
     }
 
-    return await this.summarizeFindings(validatedInput.pageUrl, artifactSummaries, chunkAnalyses);
+    return await this.summarizeFindings(validatedInput.pageUrl, validatedInput.domSnapshots, artifactSummaries, chunkAnalyses);
   }
 
   private emitChunkEvent(state: Extract<AnalysisProgressState, "started" | "completed">, input: ChunkTaskInput): void {
@@ -366,6 +368,7 @@ export class AiBundleAnalyzer {
 
   private async summarizeFindings(
     pageUrl: string,
+    domSnapshots: DomPageSnapshot[],
     artifactSummaries: ArtifactSummary[],
     chunkAnalyses: ChunkAnalysis[],
   ): Promise<BundleAnalysis> {
@@ -377,7 +380,15 @@ export class AiBundleAnalyzer {
           "You are the lead synthesis agent for the final report.",
           "Merge artifact summaries and chunk analyses into a coherent site-level reverse-engineering map with the strongest evidence available.",
         ].join(" "),
-        prompt: [`Target page: ${pageUrl}`, "Artifact summaries:", JSON.stringify(artifactSummaries, null, 2), "Chunk analyses:", JSON.stringify(chunkAnalyses, null, 2)].join("\n\n"),
+        prompt: [
+          `Target page: ${pageUrl}`,
+          "DOM snapshots:",
+          JSON.stringify(domSnapshots, null, 2),
+          "Artifact summaries:",
+          JSON.stringify(artifactSummaries, null, 2),
+          "Chunk analyses:",
+          JSON.stringify(chunkAnalyses, null, 2),
+        ].join("\n\n"),
         schema: finalAnalysisSchema.omit({ artifactSummaries: true, analyzedChunkCount: true }),
         contract: [
           "JSON contract:",

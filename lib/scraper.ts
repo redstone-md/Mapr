@@ -11,6 +11,7 @@ import {
   type ArtifactCandidate,
   type DiscoveredArtifact,
 } from "./artifacts";
+import { DomSnapshotBuilder, type DomPageSnapshot } from "./dom-snapshot";
 import { isAuthLikePathname } from "./url-patterns";
 import { WasmModuleSummarizer } from "./wasm";
 
@@ -33,6 +34,7 @@ export interface ScrapeResult {
   artifacts: DiscoveredArtifact[];
   htmlPages: string[];
   scriptUrls: string[];
+  domSnapshots: DomPageSnapshot[];
 }
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -143,6 +145,7 @@ function summarizeSourceMap(rawMap: string, mapUrl: string): string {
 
 export class BundleScraper {
   private readonly options: z.infer<typeof scraperOptionsSchema>;
+  private readonly domSnapshotBuilder = new DomSnapshotBuilder();
   private readonly wasmSummarizer = new WasmModuleSummarizer();
   private readonly onProgress: ((event: ScraperProgressEvent) => void) | undefined;
 
@@ -160,6 +163,7 @@ export class BundleScraper {
     const crawlScope: CrawlScope = isRootLikeEntry(validatedPageUrl) ? "site" : "page";
     const visitedUrls = new Set<string>();
     const htmlPages = new Set<string>();
+    const domSnapshots: DomPageSnapshot[] = [];
     const artifacts: DiscoveredArtifact[] = [];
     const queue: QueueEntry[] = [
       {
@@ -221,6 +225,7 @@ export class BundleScraper {
 
       if (artifact.type === "html") {
         htmlPages.add(artifact.url);
+        domSnapshots.push(this.domSnapshotBuilder.build(artifact.content, artifact.url));
       }
 
       if (isAnalyzableArtifactType(artifact.type)) {
@@ -251,6 +256,7 @@ export class BundleScraper {
       scriptUrls: artifacts
         .filter((artifact) => artifact.type === "script" || artifact.type === "service-worker" || artifact.type === "worker")
         .map((artifact) => artifact.url),
+      domSnapshots,
     };
   }
 

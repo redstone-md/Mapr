@@ -8,6 +8,28 @@ describe("ReportWriter", () => {
     const markdown = writer.generateMarkdown({
       targetUrl: "https://example.com",
       htmlPages: ["https://example.com"],
+      domSnapshots: [
+        {
+          url: "https://example.com",
+          title: "Example Login",
+          headings: ["Sign in"],
+          forms: [
+            {
+              action: "https://example.com/login",
+              method: "POST",
+              inputNames: ["email", "password"],
+              inputTypes: ["email", "password"],
+              submitLabels: ["Continue"],
+            },
+          ],
+          buttons: ["Continue"],
+          links: ["Forgot password"],
+          iframes: [],
+          inlineStateHints: ["global:__INITIAL_STATE__"],
+          dataAttributeKeys: ["data-testid"],
+          summary: "title \"Example Login\", 1 heading(s), 1 form(s), 1 button label(s), 1 inline state hint(s)",
+        },
+      ],
       reportStatus: "partial",
       analysisError: "Provider rate limit hit during analysis.",
       artifacts: [
@@ -37,5 +59,7 @@ describe("ReportWriter", () => {
 
     expect(markdown).toContain("Report status: partial");
     expect(markdown).toContain("Analysis ended early: Provider rate limit hit during analysis.");
+    expect(markdown).toContain("## DOM Surface");
+    expect(markdown).toContain("forms: POST https://example.com/login [email, password]");
   });
 });

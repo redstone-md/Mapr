@@ -4,11 +4,13 @@ import { z } from "zod";
 
 import type { BundleAnalysis } from "./analysis-schema";
 import { artifactTypeSchema } from "./artifacts";
+import { domPageSnapshotSchema, type DomPageSnapshot } from "./dom-snapshot";
 import type { FormattedArtifact } from "./formatter";
 
 const reportInputSchema = z.object({
   targetUrl: z.string().url(),
   htmlPages: z.array(z.string().url()),
+  domSnapshots: z.array(domPageSnapshotSchema).default([]),
   reportStatus: z.enum(["complete", "partial"]).default("complete"),
   analysisError: z.string().min(1).optional(),
   artifacts: z.array(
@@ -89,6 +91,28 @@ function formatArtifactTable(artifacts: FormattedArtifact[]): string {
   return lines.join("\n");
 }
 
+function formatDomSnapshots(domSnapshots: DomPageSnapshot[]): string {
+  if (domSnapshots.length === 0) {
+    return "- No DOM snapshots collected";
+  }
+
+  return domSnapshots
+    .map((snapshot) => {
+      const formSummary =
+        snapshot.forms.length > 0
+          ? `forms: ${snapshot.forms
+              .map((form) => `${form.method} ${form.action} [${form.inputNames.join(", ") || form.inputTypes.join(", ") || "no-fields"}]`)
+              .join("; ")}`
+          : "forms: none";
+      const iframeSummary = snapshot.iframes.length > 0 ? `iframes: ${snapshot.iframes.join(", ")}` : "iframes: none";
+      const hintSummary =
+        snapshot.inlineStateHints.length > 0 ? `state hints: ${snapshot.inlineStateHints.join(", ")}` : "state hints: none";
+
+      return `- ${snapshot.url}: ${snapshot.summary}; ${formSummary}; ${iframeSummary}; ${hintSummary}`;
+    })
+    .join("\n");
+}
+
 export class ReportWriter {
   public generateMarkdown(input: ReportInput): string {
     const report = reportInputSchema.parse(input);
@@ -141,6 +165,10 @@ export class ReportWriter {
       "",
       formatBulletList(report.htmlPages, "No HTML pages crawled beyond the entry page"),
       "",
+      "## DOM Surface",
+      "",
+      formatDomSnapshots(report.domSnapshots),
+      "",
       "## Executive Summary",
       "",
       report.analysis.overview,
@@ -188,6 +216,7 @@ export class ReportWriter {
   public async writeReport(input: {
     targetUrl: string;
     htmlPages: string[];
+    domSnapshots: DomPageSnapshot[];
     reportStatus?: "complete" | "partial";
     analysisError?: string;
     artifacts: FormattedArtifact[];

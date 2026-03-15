@@ -228,6 +228,7 @@ async function run(): Promise<void> {
     try {
       const completedAnalysis = await analyzer.analyze({
         pageUrl: scrapeResult.pageUrl,
+        domSnapshots: scrapeResult.domSnapshots,
         artifacts: formattedArtifacts,
       });
 
@@ -262,6 +263,7 @@ async function run(): Promise<void> {
   const reportPath = await reportWriter.writeReport({
     targetUrl: scrapeResult.pageUrl,
     htmlPages: scrapeResult.htmlPages,
+    domSnapshots: scrapeResult.domSnapshots,
     reportStatus,
     ...(analysisError !== undefined ? { analysisError } : {}),
     artifacts: formattedArtifacts,
