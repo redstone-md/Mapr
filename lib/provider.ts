@@ -2,6 +2,9 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { z } from "zod";
 
+import packageJson from "../package.json";
+import { CodexCliAuthManager, DEFAULT_CHATGPT_CODEX_BASE_URL } from "./codex-auth";
+
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const DEFAULT_MODEL = "gpt-4.1-mini";
 export const DEFAULT_MODEL_CONTEXT_SIZE = 128000;
@@ -9,6 +12,7 @@ export const DEFAULT_MODEL_CONTEXT_SIZE = 128000;
 export const providerTypeSchema = z.enum(["openai", "openai-compatible"]);
 export const providerPresetSchema = z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]);
 export const openAiModeSchema = z.enum(["fast", "reasoning"]);
+export const authMethodSchema = z.enum(["api-key", "codex-cli"]);
 
 export interface ProviderPreset {
   id: z.infer<typeof providerPresetSchema>;
@@ -83,11 +87,42 @@ export const aiProviderConfigSchema = z.object({
   providerType: providerTypeSchema.default("openai"),
   providerPreset: providerPresetSchema.optional(),
   openAiMode: openAiModeSchema.optional(),
+  authMethod: authMethodSchema.optional(),
   providerName: z.string().min(1).default("OpenAI"),
-  apiKey: z.string().min(1, "API key is required."),
+  apiKey: z.string().min(1, "API key is required.").optional(),
+  codexHomePath: z.string().min(1).optional(),
   baseURL: z.string().trim().url("Base URL must be a valid URL.").default(DEFAULT_OPENAI_BASE_URL),
   model: z.string().min(1).default(DEFAULT_MODEL),
   modelContextSize: z.number().int().positive().default(DEFAULT_MODEL_CONTEXT_SIZE),
+}).superRefine((config, ctx) => {
+  if (config.providerType === "openai-compatible") {
+    if (!config.apiKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["apiKey"],
+        message: "API key is required.",
+      });
+    }
+
+    if (config.authMethod !== undefined && config.authMethod !== "api-key") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["authMethod"],
+        message: "Only OpenAI supports Codex CLI auth.",
+      });
+    }
+
+    return;
+  }
+
+  const authMethod = config.authMethod ?? "api-key";
+  if (authMethod === "api-key" && !config.apiKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["apiKey"],
+      message: "API key is required.",
+    });
+  }
 });
 
 export type AiProviderConfig = z.infer<typeof aiProviderConfigSchema>;
@@ -263,8 +298,19 @@ function extractModelEntries(payload: unknown): JsonRecord[] {
 }
 
 function getModelId(entry: JsonRecord): string | undefined {
-  const candidateKeys = ["id", "model", "name"];
+  const candidateKeys = ["id", "model", "name", "slug"];
   for (const key of candidateKeys) {
+    const value = entry[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
+}
+
+function getModelLabel(entry: JsonRecord): string | undefined {
+  for (const key of ["display_name", "label", "name"]) {
     const value = entry[key];
     if (typeof value === "string" && value.trim().length > 0) {
       return value.trim();
@@ -427,9 +473,16 @@ export function extractContextWindowFromMetadata(value: unknown): number | undef
 
 export class AiProviderClient {
   private readonly config: AiProviderConfig;
+  private readonly codexCliAuthManager: CodexCliAuthManager | null;
 
   public constructor(config: AiProviderConfig) {
     this.config = aiProviderConfigSchema.parse(config);
+    this.codexCliAuthManager =
+      this.config.providerType === "openai" && (this.config.authMethod ?? "api-key") === "codex-cli"
+        ? new CodexCliAuthManager({
+            ...(this.config.codexHomePath !== undefined ? { codexHomePath: this.config.codexHomePath } : {}),
+          })
+        : null;
   }
 
   public getConfig(): AiProviderConfig {
@@ -454,7 +507,7 @@ export class AiProviderClient {
     if (this.config.providerType === "openai-compatible") {
       const provider = createOpenAICompatible({
         name: this.config.providerName,
-        apiKey: this.config.apiKey,
+        ...(this.config.apiKey !== undefined ? { apiKey: this.config.apiKey } : {}),
         baseURL: this.config.baseURL,
       });
 
@@ -462,8 +515,13 @@ export class AiProviderClient {
     }
 
     const provider = createOpenAI({
-      apiKey: this.config.apiKey,
+      ...(this.config.apiKey !== undefined ? { apiKey: this.config.apiKey } : {}),
       baseURL: this.config.baseURL,
+      ...(this.codexCliAuthManager !== null
+        ? {
+            fetch: this.codexCliAuthManager.createAuthenticatedFetch() as typeof fetch,
+          }
+        : {}),
     });
 
     return provider(modelId);
@@ -476,12 +534,21 @@ export class AiProviderClient {
 
   public async fetchModelCatalog(fetcher: FetchLike = fetch): Promise<ProviderModelInfo[]> {
     const endpoint = resolveModelCatalogEndpoint(this.config);
-    const response = await fetcher(endpoint, {
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        Accept: "application/json",
-      },
-    });
+    const requestUrl =
+      this.codexCliAuthManager !== null
+        ? new URL(endpoint).toString().includes("?")
+          ? `${endpoint}&client_version=${encodeURIComponent(packageJson.version)}`
+          : `${endpoint}?client_version=${encodeURIComponent(packageJson.version)}`
+        : endpoint;
+    const response =
+      this.codexCliAuthManager !== null
+        ? await this.codexCliAuthManager.createAuthenticatedFetch(fetcher)(requestUrl, { headers: { Accept: "application/json" } })
+        : await fetcher(requestUrl, {
+            headers: {
+              Authorization: `Bearer ${this.config.apiKey}`,
+              Accept: "application/json",
+            },
+          });
 
     if (!response.ok) {
       throw new Error(`Model discovery failed: ${response.status} ${response.statusText}`);
@@ -496,7 +563,12 @@ export class AiProviderClient {
         }
 
         const contextSize = extractContextWindowFromMetadata(entry);
-        return contextSize !== undefined ? { id, contextSize } : { id };
+        const label = getModelLabel(entry);
+        return {
+          id,
+          ...(contextSize !== undefined ? { contextSize } : {}),
+          ...(label !== undefined ? { label } : {}),
+        };
       })
       .filter((entry): entry is ProviderModelInfo => entry !== null);
 

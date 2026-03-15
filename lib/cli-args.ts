@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { getProviderPreset, openAiModeSchema, providerPresetSchema, providerTypeSchema } from "./provider";
+import { authMethodSchema, getProviderPreset, openAiModeSchema, providerPresetSchema, providerTypeSchema } from "./provider";
 
 const rawCliArgsSchema = z.object({
   help: z.boolean().default(false),
@@ -15,8 +15,10 @@ const rawCliArgsSchema = z.object({
   providerType: providerTypeSchema.optional(),
   providerPreset: providerPresetSchema.optional(),
   openAiMode: openAiModeSchema.optional(),
+  authMethod: authMethodSchema.optional(),
   providerName: z.string().min(1).optional(),
   apiKey: z.string().min(1).optional(),
+  codexHomePath: z.string().min(1).optional(),
   baseURL: z.string().url().optional(),
   model: z.string().min(1).optional(),
   contextSize: z.number().int().positive().optional(),
@@ -31,8 +33,10 @@ const cliConfigOverrideSchema = z
     providerType: providerTypeSchema.optional(),
     providerPreset: providerPresetSchema.optional(),
     openAiMode: openAiModeSchema.optional(),
+    authMethod: authMethodSchema.optional(),
     providerName: z.string().min(1).optional(),
     apiKey: z.string().min(1).optional(),
+    codexHomePath: z.string().min(1).optional(),
     baseURL: z.string().url().optional(),
     model: z.string().min(1).optional(),
     modelContextSize: z.number().int().positive().optional(),
@@ -57,8 +61,10 @@ const optionMap = new Map<string, keyof CliArgs>([
   ["--provider-type", "providerType"],
   ["--provider-preset", "providerPreset"],
   ["--openai-mode", "openAiMode"],
+  ["--auth-method", "authMethod"],
   ["--provider-name", "providerName"],
   ["--api-key", "apiKey"],
+  ["--codex-home", "codexHomePath"],
   ["--base-url", "baseURL"],
   ["--model", "model"],
   ["--context-size", "contextSize"],
@@ -121,6 +127,7 @@ export function getConfigOverrides(args: CliArgs) {
 
   if (args.providerType !== undefined) overrides.providerType = args.providerType;
   if (args.openAiMode !== undefined) overrides.openAiMode = args.openAiMode;
+  if (args.authMethod !== undefined) overrides.authMethod = args.authMethod;
   if (args.providerPreset !== undefined) {
     const preset = getProviderPreset(args.providerPreset);
     overrides.providerType = "openai-compatible";
@@ -130,6 +137,7 @@ export function getConfigOverrides(args: CliArgs) {
   }
   if (args.providerName !== undefined) overrides.providerName = args.providerName;
   if (args.apiKey !== undefined) overrides.apiKey = args.apiKey;
+  if (args.codexHomePath !== undefined) overrides.codexHomePath = args.codexHomePath;
   if (args.baseURL !== undefined) overrides.baseURL = args.baseURL;
   if (args.model !== undefined) overrides.model = args.model;
   if (args.contextSize !== undefined) overrides.modelContextSize = args.contextSize;
@@ -156,8 +164,10 @@ export function renderHelpText(): string {
     "  --provider-type <type>          openai | openai-compatible",
     "  --provider-preset <preset>      custom | blackbox | nvidia-nim | onlysq",
     "  --openai-mode <mode>            fast | reasoning",
+    "  --auth-method <method>          api-key | codex-cli",
     "  --provider-name <name>          Display name for the provider",
     "  --api-key <key>                 Provider API key",
+    "  --codex-home <path>             Path to the local Codex CLI home, defaults to ~/.codex",
     "  --base-url <url>                Base URL for the provider",
     "  --model <id>                    Model identifier",
     "  --context-size <tokens>         Model context window, for example 128000 or 512000",

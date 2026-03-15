@@ -128,4 +128,27 @@ describe("ConfigManager", () => {
     expect(config.model).toBe("qwen2.5-coder-32b");
     expect(config.modelContextSize).toBe(512000);
   });
+
+  test("persists and reloads Codex CLI auth configuration", async () => {
+    const tempHome = await mkdtemp(join(tmpdir(), "mapr-config-"));
+    createdDirectories.push(tempHome);
+
+    const manager = new ConfigManager({ homeDir: tempHome });
+    await manager.saveConfig({
+      providerType: "openai",
+      authMethod: "codex-cli",
+      providerName: "OpenAI",
+      codexHomePath: join(tempHome, ".codex"),
+      baseURL: "https://chatgpt.com/backend-api/codex",
+      model: "gpt-5.4",
+      modelContextSize: 272000,
+    });
+
+    const reloadedConfig = await manager.ensureConfig();
+    expect(reloadedConfig.providerType).toBe("openai");
+    expect(reloadedConfig.authMethod).toBe("codex-cli");
+    expect(reloadedConfig.codexHomePath).toBe(join(tempHome, ".codex"));
+    expect(reloadedConfig.baseURL).toBe("https://chatgpt.com/backend-api/codex");
+    expect(reloadedConfig.model).toBe("gpt-5.4");
+  });
 });
