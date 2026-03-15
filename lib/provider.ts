@@ -8,6 +8,7 @@ import { CodexCliAuthManager, DEFAULT_CHATGPT_CODEX_BASE_URL } from "./codex-aut
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const DEFAULT_MODEL = "gpt-4.1-mini";
 export const DEFAULT_MODEL_CONTEXT_SIZE = 128000;
+const CODEX_CLI_PLACEHOLDER_API_KEY = "codex-cli-auth";
 
 export const providerTypeSchema = z.enum(["openai", "openai-compatible"]);
 export const providerPresetSchema = z.enum(["custom", "blackbox", "nvidia-nim", "onlysq"]);
@@ -515,7 +516,11 @@ export class AiProviderClient {
     }
 
     const provider = createOpenAI({
-      ...(this.config.apiKey !== undefined ? { apiKey: this.config.apiKey } : {}),
+      ...(this.codexCliAuthManager !== null
+        ? { apiKey: CODEX_CLI_PLACEHOLDER_API_KEY }
+        : this.config.apiKey !== undefined
+          ? { apiKey: this.config.apiKey }
+          : {}),
       baseURL: this.config.baseURL,
       ...(this.codexCliAuthManager !== null
         ? {
