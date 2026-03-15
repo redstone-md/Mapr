@@ -10,6 +10,7 @@ import { getConfigOverrides, parseCliArgs, renderHelpText } from "./lib/cli-args
 import { ConfigManager } from "./lib/config";
 import { BundleFormatter } from "./lib/formatter";
 import { renderProgressBar } from "./lib/progress";
+import { findKnownModelInfo, isCodexModel } from "./lib/provider";
 import { ReportWriter } from "./lib/reporter";
 import { BundleScraper } from "./lib/scraper";
 import { SWARM_AGENT_ORDER } from "./lib/swarm-prompts";
@@ -247,12 +248,14 @@ async function run(): Promise<void> {
   });
   reportStep.stop(reportStatus === "partial" ? "Partial report written to disk" : "Report written to disk");
 
+  const selectedModelInfo = findKnownModelInfo(config.model);
   const summaryLines = [
     reportStatus === "partial" ? `${pc.yellow("Analysis incomplete.")}` : `${pc.green("Analysis complete.")}`,
     `${pc.bold("Status:")} ${reportStatus === "partial" ? "partial report saved after error" : "complete"}`,
     `${pc.bold("Target:")} ${scrapeResult.pageUrl}`,
     `${pc.bold("Provider:")} ${config.providerName} (${config.model})`,
     `${pc.bold("Context size:")} ${config.modelContextSize.toLocaleString()} tokens`,
+    ...(isCodexModel(config.model) && selectedModelInfo?.usageLimitsNote ? [`${pc.bold("Codex limits:")} ${selectedModelInfo.usageLimitsNote}`] : []),
     `${pc.bold("Concurrency:")} ${analysisConcurrency}`,
     `${pc.bold("Local RAG:")} ${args.localRag ? "enabled" : "disabled"}`,
     `${pc.bold("Pages:")} ${scrapeResult.htmlPages.length}`,

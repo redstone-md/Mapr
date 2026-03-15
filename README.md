@@ -10,6 +10,7 @@ This repository is public for source visibility and collaboration. The license r
 
 - Bun-only CLI/TUI with interactive setup through `@clack/prompts`
 - OpenAI and OpenAI-compatible provider support
+- OpenAI Codex family support with fast/reasoning selection
 - Built-in provider presets for BlackBox AI, Nvidia NIM, and OnlySQ
 - Model discovery with searchable selection
 - Automatic context-window detection from provider model metadata when available
