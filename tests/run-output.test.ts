@@ -90,6 +90,7 @@ describe("RunArtifactsWriter", () => {
     const manifest = await readFile(join(result.runDirectory, "artifacts", "index.json"), "utf8");
     const readme = await readFile(join(result.runDirectory, "README.md"), "utf8");
     const htmlReport = await readFile(join(result.runDirectory, "report.html"), "utf8");
+    const browserTrace = await readFile(join(result.runDirectory, "browser-trace.json"), "utf8");
 
     expect(result.reportPath).toBe(join(outputDir, "report.md"));
     expect(metadata).toContain("\"test\": true");
@@ -99,5 +100,8 @@ describe("RunArtifactsWriter", () => {
     expect(htmlReport).toContain("graph-svg");
     expect(htmlReport).toContain("preview-tab");
     expect(htmlReport).toContain("data-jump-artifact-by-url");
+    expect(htmlReport).toContain('"summary"');
+    expect(htmlReport).not.toContain("&quot;summary&quot;");
+    expect(browserTrace.trim()).toBe("null");
   });
 });

@@ -75,6 +75,42 @@ describe("FlowSurfaceDiscoverer", () => {
           evidence: ["query Viewer"],
         },
       ],
+      browserTrace: {
+        status: "captured",
+        mode: "playwright",
+        finalUrl: "https://example.com/login.html",
+        frameUrls: ["https://example.com/login.html"],
+        requests: [
+          {
+            url: "https://example.com/api/login",
+            method: "POST",
+            resourceType: "xhr",
+            status: 200,
+          },
+          {
+            url: "https://example.com/api/risk/challenge",
+            method: "POST",
+            resourceType: "fetch",
+            status: 403,
+          },
+        ],
+        consoleMessages: [{ type: "error", text: "captcha required" }],
+        pageErrors: ["challenge blocked"],
+        storage: {
+          localStorageKeys: ["token"],
+          sessionStorageKeys: [],
+          cookieNames: ["sid"],
+          interestingGlobals: ["turnstile"],
+        },
+        runtimeSignals: {
+          captchaProviders: ["Cloudflare Turnstile"],
+          authRequestUrls: ["https://example.com/api/login"],
+          challengeRequestUrls: ["https://example.com/api/risk/challenge"],
+          fingerprintingRequestUrls: ["https://example.com/api/device/profile"],
+          encryptionHints: ["crypto.subtle.digest"],
+        },
+        notes: ["runtime auth path observed"],
+      },
     });
 
     expect(result.authFlows.length).toBeGreaterThan(0);
@@ -82,5 +118,7 @@ describe("FlowSurfaceDiscoverer", () => {
     expect(result.fingerprintingSignals.length).toBeGreaterThan(0);
     expect(result.encryptionSignals.length).toBeGreaterThan(0);
     expect(result.securityFindings.some((finding) => finding.title.includes("GraphQL introspection"))).toBe(true);
+    expect(result.authFlows[0]?.tokens.some((entry) => entry.includes("cookie:sid"))).toBe(true);
+    expect(result.captchaFlows[0]?.endpoints).toContain("https://example.com/api/risk/challenge");
   });
 });

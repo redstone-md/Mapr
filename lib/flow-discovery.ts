@@ -1,3 +1,4 @@
+import type { BrowserTrace } from "./browser-trace";
 import type { DomPageSnapshot } from "./dom-snapshot";
 import type { FormattedArtifact } from "./formatter";
 import type { ApiEndpoint, GraphQlEndpoint } from "./surface-analysis";
@@ -115,6 +116,41 @@ function buildAuthFlow(domSnapshots: DomPageSnapshot[], apiEndpoints: ApiEndpoin
   ];
 }
 
+function mergeRuntimeAuthFlow(flow: AuthFlow, browserTrace: BrowserTrace | undefined): AuthFlow {
+  if (!browserTrace || browserTrace.status !== "captured") {
+    return flow;
+  }
+
+  return authFlowSchema.parse({
+    ...flow,
+    steps: [
+      ...flow.steps,
+      ...(browserTrace.runtimeSignals.authRequestUrls.length > 0
+        ? [
+            {
+              title: "Runtime network activity",
+              description: "Browser-assisted tracing observed auth-like requests after hydration.",
+              endpoints: browserTrace.runtimeSignals.authRequestUrls,
+              evidence: browserTrace.consoleMessages.slice(0, 4).map((entry) => `${entry.type}: ${entry.text}`),
+            },
+          ]
+        : []),
+    ],
+    tokens: unique([
+      ...flow.tokens,
+      ...browserTrace.storage.cookieNames.map((cookie) => `cookie:${cookie}`),
+      ...browserTrace.storage.localStorageKeys.map((key) => `localStorage:${key}`),
+      ...browserTrace.storage.sessionStorageKeys.map((key) => `sessionStorage:${key}`),
+    ]).slice(0, 20),
+    errors: unique([...flow.errors, ...browserTrace.pageErrors, ...browserTrace.consoleMessages.map((entry) => entry.text)]).slice(0, 16),
+    evidence: unique([
+      ...flow.evidence,
+      ...browserTrace.runtimeSignals.authRequestUrls,
+      ...browserTrace.notes,
+    ]).slice(0, 20),
+  });
+}
+
 function buildCaptchaFlows(domSnapshots: DomPageSnapshot[], apiEndpoints: ApiEndpoint[], artifacts: FormattedArtifact[]): CaptchaFlow[] {
   const flows: CaptchaFlow[] = [];
   const combinedText = artifacts.map((artifact) => artifact.formattedContent || artifact.content).join("\n");
@@ -151,6 +187,45 @@ function buildCaptchaFlows(domSnapshots: DomPageSnapshot[], apiEndpoints: ApiEnd
   return flows;
 }
 
+function mergeRuntimeCaptchaFlows(flows: CaptchaFlow[], browserTrace: BrowserTrace | undefined): CaptchaFlow[] {
+  if (!browserTrace || browserTrace.status !== "captured") {
+    return flows;
+  }
+
+  const runtimeProviders = browserTrace.runtimeSignals.captchaProviders;
+  const runtimeEndpoints = browserTrace.runtimeSignals.challengeRequestUrls;
+  const runtimeErrors = unique([...browserTrace.pageErrors, ...browserTrace.consoleMessages.map((entry) => entry.text)]).filter((entry) =>
+    /(captcha|challenge|turnstile|recaptcha|hcaptcha|verify|risk)/i.test(entry),
+  );
+
+  if (runtimeProviders.length === 0 && runtimeEndpoints.length === 0 && runtimeErrors.length === 0) {
+    return flows;
+  }
+
+  if (flows.length === 0) {
+    return [
+      captchaFlowSchema.parse({
+        provider: runtimeProviders[0] ?? "Runtime challenge flow",
+        triggers: runtimeErrors.slice(0, 6),
+        endpoints: runtimeEndpoints,
+        requestFields: [],
+        errors: runtimeErrors.slice(0, 10),
+        evidence: [...runtimeProviders, ...browserTrace.notes],
+      }),
+    ];
+  }
+
+  return flows.map((flow) =>
+    captchaFlowSchema.parse({
+      ...flow,
+      provider: runtimeProviders[0] ?? flow.provider,
+      endpoints: unique([...flow.endpoints, ...runtimeEndpoints]).slice(0, 12),
+      errors: unique([...flow.errors, ...runtimeErrors]).slice(0, 12),
+      evidence: unique([...flow.evidence, ...runtimeProviders, ...browserTrace.notes]).slice(0, 12),
+    }),
+  );
+}
+
 function buildFingerprintingSignals(apiEndpoints: ApiEndpoint[], artifacts: FormattedArtifact[]): FingerprintingSignal[] {
   const signals: FingerprintingSignal[] = [];
 
@@ -183,6 +258,32 @@ function buildFingerprintingSignals(apiEndpoints: ApiEndpoint[], artifacts: Form
   return signals;
 }
 
+function mergeRuntimeFingerprintingSignals(signals: FingerprintingSignal[], browserTrace: BrowserTrace | undefined): FingerprintingSignal[] {
+  if (!browserTrace || browserTrace.status !== "captured" || browserTrace.runtimeSignals.fingerprintingRequestUrls.length === 0) {
+    return signals;
+  }
+
+  if (signals.length === 0) {
+    return [
+      fingerprintingSignalSchema.parse({
+        collector: "runtime telemetry and device profiling",
+        dataPoints: browserTrace.storage.interestingGlobals,
+        destinationUrls: browserTrace.runtimeSignals.fingerprintingRequestUrls,
+        purpose: "Browser-assisted tracing observed likely telemetry or device-risk network activity after hydration.",
+        evidence: browserTrace.notes,
+      }),
+    ];
+  }
+
+  return signals.map((signal) =>
+    fingerprintingSignalSchema.parse({
+      ...signal,
+      destinationUrls: unique([...signal.destinationUrls, ...browserTrace.runtimeSignals.fingerprintingRequestUrls]).slice(0, 10),
+      evidence: unique([...signal.evidence, ...browserTrace.notes]).slice(0, 12),
+    }),
+  );
+}
+
 function buildEncryptionSignals(apiEndpoints: ApiEndpoint[], artifacts: FormattedArtifact[]): EncryptionSignal[] {
   const signals: EncryptionSignal[] = [];
 
@@ -212,6 +313,33 @@ function buildEncryptionSignals(apiEndpoints: ApiEndpoint[], artifacts: Formatte
   }
 
   return signals;
+}
+
+function mergeRuntimeEncryptionSignals(signals: EncryptionSignal[], browserTrace: BrowserTrace | undefined): EncryptionSignal[] {
+  if (!browserTrace || browserTrace.status !== "captured" || browserTrace.runtimeSignals.encryptionHints.length === 0) {
+    return signals;
+  }
+
+  if (signals.length === 0) {
+    return [
+      encryptionSignalSchema.parse({
+        algorithmHints: browserTrace.runtimeSignals.encryptionHints,
+        inputs: [],
+        outputs: [],
+        destinationUrls: browserTrace.runtimeSignals.authRequestUrls,
+        evidence: browserTrace.notes,
+      }),
+    ];
+  }
+
+  return signals.map((signal) =>
+    encryptionSignalSchema.parse({
+      ...signal,
+      algorithmHints: unique([...signal.algorithmHints, ...browserTrace.runtimeSignals.encryptionHints]).slice(0, 12),
+      destinationUrls: unique([...signal.destinationUrls, ...browserTrace.runtimeSignals.authRequestUrls]).slice(0, 10),
+      evidence: unique([...signal.evidence, ...browserTrace.notes]).slice(0, 12),
+    }),
+  );
 }
 
 function buildSecurityFindings(
@@ -267,6 +395,7 @@ export class FlowSurfaceDiscoverer {
     artifacts: FormattedArtifact[];
     apiEndpoints: ApiEndpoint[];
     graphQlEndpoints: GraphQlEndpoint[];
+    browserTrace?: BrowserTrace;
   }): {
     authFlows: AuthFlow[];
     captchaFlows: CaptchaFlow[];
@@ -274,10 +403,18 @@ export class FlowSurfaceDiscoverer {
     encryptionSignals: EncryptionSignal[];
     securityFindings: SecurityFinding[];
   } {
-    const authFlows = buildAuthFlow(input.domSnapshots, input.apiEndpoints, input.artifacts);
-    const captchaFlows = buildCaptchaFlows(input.domSnapshots, input.apiEndpoints, input.artifacts);
-    const fingerprintingSignals = buildFingerprintingSignals(input.apiEndpoints, input.artifacts);
-    const encryptionSignals = buildEncryptionSignals(input.apiEndpoints, input.artifacts);
+    const authFlows = buildAuthFlow(input.domSnapshots, input.apiEndpoints, input.artifacts).map((flow) =>
+      mergeRuntimeAuthFlow(flow, input.browserTrace),
+    );
+    const captchaFlows = mergeRuntimeCaptchaFlows(buildCaptchaFlows(input.domSnapshots, input.apiEndpoints, input.artifacts), input.browserTrace);
+    const fingerprintingSignals = mergeRuntimeFingerprintingSignals(
+      buildFingerprintingSignals(input.apiEndpoints, input.artifacts),
+      input.browserTrace,
+    );
+    const encryptionSignals = mergeRuntimeEncryptionSignals(
+      buildEncryptionSignals(input.apiEndpoints, input.artifacts),
+      input.browserTrace,
+    );
     const securityFindings = buildSecurityFindings(authFlows, captchaFlows, fingerprintingSignals, input.graphQlEndpoints);
 
     return {

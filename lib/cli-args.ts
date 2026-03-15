@@ -9,6 +9,7 @@ const rawCliArgsSchema = z.object({
   reconfigure: z.boolean().default(false),
   listModels: z.boolean().default(false),
   localRag: z.boolean().optional(),
+  browserAssisted: z.boolean().optional(),
   verboseAgents: z.boolean().default(false),
   url: z.string().url().optional(),
   output: z.string().min(1).optional(),
@@ -23,6 +24,7 @@ const rawCliArgsSchema = z.object({
   model: z.string().min(1).optional(),
   contextSize: z.number().int().positive().optional(),
   analysisConcurrency: z.number().int().positive().optional(),
+  browserTimeoutMs: z.number().int().positive().optional(),
   maxPages: z.number().int().positive().optional(),
   maxArtifacts: z.number().int().positive().optional(),
   maxDepth: z.number().int().nonnegative().optional(),
@@ -54,6 +56,7 @@ const optionMap = new Map<string, keyof CliArgs>([
   ["--reconfigure", "reconfigure"],
   ["--list-models", "listModels"],
   ["--local-rag", "localRag"],
+  ["--browser-assisted", "browserAssisted"],
   ["--verbose-agents", "verboseAgents"],
   ["--url", "url"],
   ["-u", "url"],
@@ -69,14 +72,27 @@ const optionMap = new Map<string, keyof CliArgs>([
   ["--model", "model"],
   ["--context-size", "contextSize"],
   ["--analysis-concurrency", "analysisConcurrency"],
+  ["--browser-timeout-ms", "browserTimeoutMs"],
   ["--max-pages", "maxPages"],
   ["--max-artifacts", "maxArtifacts"],
   ["--max-depth", "maxDepth"],
 ]);
 
-const booleanFalseOptionMap = new Map<string, keyof CliArgs>([["--no-local-rag", "localRag"]]);
-const booleanKeys = new Set<keyof CliArgs>(["help", "version", "headless", "reconfigure", "listModels", "localRag", "verboseAgents"]);
-const numberKeys = new Set<keyof CliArgs>(["contextSize", "analysisConcurrency", "maxPages", "maxArtifacts", "maxDepth"]);
+const booleanFalseOptionMap = new Map<string, keyof CliArgs>([
+  ["--no-local-rag", "localRag"],
+  ["--no-browser-assisted", "browserAssisted"],
+]);
+const booleanKeys = new Set<keyof CliArgs>([
+  "help",
+  "version",
+  "headless",
+  "reconfigure",
+  "listModels",
+  "localRag",
+  "browserAssisted",
+  "verboseAgents",
+]);
+const numberKeys = new Set<keyof CliArgs>(["contextSize", "analysisConcurrency", "browserTimeoutMs", "maxPages", "maxArtifacts", "maxDepth"]);
 
 function normalizeValue(key: keyof CliArgs, value: string): unknown {
   if (numberKeys.has(key)) {
@@ -182,6 +198,9 @@ export function renderHelpText(): string {
     "  --model <id>                    Model identifier",
     "  --context-size <tokens>         Model context window, for example 128000 or 512000",
     "  --analysis-concurrency <n>      Parallel chunk analyses per artifact",
+    "  --browser-assisted              Enable Playwright post-hydration tracing",
+    "  --no-browser-assisted           Disable Playwright post-hydration tracing explicitly",
+    "  --browser-timeout-ms <ms>       Timeout for Playwright browser tracing",
     "  --list-models                   Fetch and print models using the resolved provider config",
     "  --local-rag                     Enable local lexical RAG for oversized artifacts",
     "  --no-local-rag                  Disable local lexical RAG explicitly",

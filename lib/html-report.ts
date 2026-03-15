@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import type { BundleAnalysis } from "./analysis-schema";
 import { artifactTypeSchema } from "./artifacts";
+import { browserTraceSchema, type BrowserTrace } from "./browser-trace";
 import { domPageSnapshotSchema, type DomPageSnapshot } from "./dom-snapshot";
 import type { FormattedArtifact } from "./formatter";
 import type { DeterministicSurface } from "./surface-analysis";
@@ -26,6 +27,7 @@ const htmlReportInputSchema = z.object({
   ),
   analysis: z.custom<BundleAnalysis>(),
   deterministicSurface: z.custom<DeterministicSurface>(),
+  browserTrace: browserTraceSchema.optional(),
 });
 
 type HtmlReportInput = z.infer<typeof htmlReportInputSchema>;
@@ -46,6 +48,15 @@ function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function serializeJsonForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003C")
+    .replace(/>/g, "\\u003E")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
 }
 
 function clip(value: string, maxLength = 1400): string {
@@ -183,6 +194,7 @@ function buildEmbeddedData(input: HtmlReportInput): string {
       ...input.deterministicSurface,
       ...flowRelations,
     },
+    browserTrace: input.browserTrace ?? null,
     manifest,
     graphNodes,
   });
@@ -295,7 +307,11 @@ const REPORT_SCRIPT = `
       ["Captcha flow",captchaCards],
       ["Fingerprinting",data.deterministicSurface.fingerprintingSignals.map((signal)=>"<div class=\\"item\\"><strong>"+q(signal.collector)+"</strong><div>"+q(signal.purpose)+"</div><div class=\\"muted\\">Data: "+q(signal.dataPoints.join(", ")||"none")+" · Destinations: "+q(signal.destinationUrls.join(", ")||"none")+"</div></div>")],
       ["Encryption / signing",data.deterministicSurface.encryptionSignals.map((signal)=>"<div class=\\"item\\"><strong>"+q(signal.algorithmHints.join(", ")||"Unknown algorithms")+"</strong><div class=\\"muted\\">Inputs: "+q(signal.inputs.join(", ")||"none")+" · Outputs: "+q(signal.outputs.join(", ")||"none")+" · Destinations: "+q(signal.destinationUrls.join(", ")||"none")+"</div></div>")],
-      ["Security findings",data.deterministicSurface.securityFindings.map((finding)=>"<div class=\\"item\\"><strong>["+q(finding.severity)+"] "+q(finding.title)+"</strong><div>"+q(finding.detail)+"</div><div class=\\"muted\\">Remediation: "+q(finding.remediation)+"</div></div>")]
+      ["Security findings",data.deterministicSurface.securityFindings.map((finding)=>"<div class=\\"item\\"><strong>["+q(finding.severity)+"] "+q(finding.title)+"</strong><div>"+q(finding.detail)+"</div><div class=\\"muted\\">Remediation: "+q(finding.remediation)+"</div></div>")],
+      ["Browser-assisted trace",data.browserTrace?[ "<div class=\\"item\\"><strong>Status</strong><div>"+q(data.browserTrace.status)+"</div><div class=\\"muted\\">Final URL: "+q(data.browserTrace.finalUrl||"n/a")+" · Requests: "+q(data.browserTrace.requests.length)+" · Frames: "+q(data.browserTrace.frameUrls.length)+"</div></div>",
+        "<div class=\\"item\\"><strong>Storage</strong><div class=\\"muted\\">Cookies: "+q((data.browserTrace.storage.cookieNames||[]).join(", ")||"none")+" · localStorage: "+q((data.browserTrace.storage.localStorageKeys||[]).join(", ")||"none")+" · sessionStorage: "+q((data.browserTrace.storage.sessionStorageKeys||[]).join(", ")||"none")+"</div></div>",
+        "<div class=\\"item\\"><strong>Runtime endpoints</strong><div class=\\"muted\\">Auth: "+q((data.browserTrace.runtimeSignals.authRequestUrls||[]).join(", ")||"none")+" · Challenge: "+q((data.browserTrace.runtimeSignals.challengeRequestUrls||[]).join(", ")||"none")+"</div></div>"
+      ]:[]]
     ];
     byId("surface-sections").innerHTML=sections.map(([title,items])=>"<div><h3>"+q(title)+"</h3>"+(items.length?items.join(""):"<p class=\\"empty\\">No entries.</p>")+"</div>").join("");
   }
@@ -331,9 +347,10 @@ export class HtmlReportBuilder {
     artifacts: FormattedArtifact[];
     analysis: BundleAnalysis;
     deterministicSurface: DeterministicSurface;
+    browserTrace?: BrowserTrace;
   }): string {
     const report = htmlReportInputSchema.parse(input);
-    const embeddedData = buildEmbeddedData(report);
+    const embeddedData = serializeJsonForScript(JSON.parse(buildEmbeddedData(report)) as unknown);
 
     return `<!doctype html>
 <html lang="en">
@@ -399,7 +416,7 @@ export class HtmlReportBuilder {
       </main>
     </div>
   </div>
-  <script id="mapr-data" type="application/json">${escapeHtml(embeddedData)}</script>
+  <script id="mapr-data" type="application/json">${embeddedData}</script>
   <script>${REPORT_SCRIPT}</script>
 </body>
 </html>`;

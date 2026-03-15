@@ -9,6 +9,7 @@ import { ApiSurfaceDiscoverer } from "./lib/api-discovery";
 import { estimateAgentTaskCount } from "./lib/analysis-planner";
 import { buildAnalysisSnapshot, PartialAnalysisError } from "./lib/analysis-schema";
 import { AiBundleAnalyzer, chunkTextByBytes, deriveChunkSizeBytes } from "./lib/ai-analyzer";
+import { BrowserAssistedTracer, type BrowserTrace } from "./lib/browser-trace";
 import { getConfigOverrides, parseCliArgs, renderHelpText } from "./lib/cli-args";
 import { ConfigManager } from "./lib/config";
 import { FlowSurfaceDiscoverer } from "./lib/flow-discovery";
@@ -116,6 +117,32 @@ async function resolveLocalRag(headless: boolean, prefilledValue: boolean | unde
   );
 }
 
+async function resolveBrowserAssisted(
+  headless: boolean,
+  prefilledValue: boolean | undefined,
+  targetUrl: string,
+): Promise<boolean> {
+  if (prefilledValue !== undefined) {
+    return prefilledValue;
+  }
+
+  if (headless) {
+    return false;
+  }
+
+  const suggestEnabled = /(login|auth|signin|signup|verify|captcha|challenge|mfa|2fa)/i.test(targetUrl);
+  return Boolean(
+    exitIfCancelled(
+      await confirm({
+        message: "Enable browser-assisted tracing?",
+        active: "Enable",
+        inactive: "Skip",
+        initialValue: suggestEnabled,
+      }),
+    ),
+  );
+}
+
 async function run(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
 
@@ -171,6 +198,7 @@ async function run(): Promise<void> {
   });
 
   const targetUrl = await resolveTargetUrl(headless, args.url);
+  const browserAssisted = await resolveBrowserAssisted(headless, args.browserAssisted, targetUrl);
 
   const scrapeStep = spinner({ indicator: "timer" });
   scrapeStep.start("Crawling HTML, scripts, service workers, WASM, and related website artifacts");
@@ -186,6 +214,25 @@ async function run(): Promise<void> {
   scrapeStep.stop(
     `Discovered ${scrapeResult.artifacts.length} artifact(s) across ${scrapeResult.htmlPages.length} page(s)`,
   );
+
+  const browserTraceStep = spinner({ indicator: "timer" });
+  let browserTrace: BrowserTrace | undefined;
+  if (browserAssisted) {
+    browserTraceStep.start("Running browser-assisted Playwright trace");
+    const tracer = new BrowserAssistedTracer({
+      enabled: true,
+      onProgress(message) {
+        browserTraceStep.message(message);
+      },
+      ...(args.browserTimeoutMs !== undefined ? { timeoutMs: args.browserTimeoutMs } : {}),
+    });
+    browserTrace = await tracer.trace(scrapeResult.pageUrl);
+    browserTraceStep.stop(
+      browserTrace.status === "captured"
+        ? `Captured ${browserTrace.requests.length} browser request(s) across ${browserTrace.frameUrls.length || 1} frame(s)`
+        : `Browser trace ${browserTrace.status}${browserTrace.error ? `: ${browserTrace.error}` : ""}`,
+    );
+  }
 
   const formatStep = spinner({ indicator: "timer" });
   formatStep.start("Formatting downloaded artifacts for analysis");
@@ -216,14 +263,17 @@ async function run(): Promise<void> {
     },
   });
   const apiSurface = await apiDiscoverer.discover(scrapeResult.pageUrl, formattedArtifacts);
+  const domSnapshotsForAnalysis =
+    browserTrace?.domSnapshot !== undefined ? [...scrapeResult.domSnapshots, browserTrace.domSnapshot] : scrapeResult.domSnapshots;
   const flowDiscoverer = new FlowSurfaceDiscoverer();
   const deterministicSurface = mergeDeterministicSurface({
     ...apiSurface,
     ...flowDiscoverer.discover({
-      domSnapshots: scrapeResult.domSnapshots,
+      domSnapshots: domSnapshotsForAnalysis,
       artifacts: formattedArtifacts,
       apiEndpoints: apiSurface.apiEndpoints,
       graphQlEndpoints: apiSurface.graphQlEndpoints,
+      ...(browserTrace !== undefined ? { browserTrace } : {}),
     }),
   });
   discoveryStep.stop(
@@ -300,7 +350,7 @@ async function run(): Promise<void> {
     try {
       const completedAnalysis = await analyzer.analyze({
         pageUrl: scrapeResult.pageUrl,
-        domSnapshots: scrapeResult.domSnapshots,
+        domSnapshots: domSnapshotsForAnalysis,
         artifacts: formattedArtifacts,
         deterministicSurface,
       });
@@ -336,12 +386,13 @@ async function run(): Promise<void> {
   const { reportPath, runDirectory } = await runWriter.writeRun({
     targetUrl: scrapeResult.pageUrl,
     htmlPages: scrapeResult.htmlPages,
-    domSnapshots: scrapeResult.domSnapshots,
+    domSnapshots: domSnapshotsForAnalysis,
     reportStatus,
     ...(analysisError !== undefined ? { analysisError } : {}),
     artifacts: formattedArtifacts,
     analysis,
     deterministicSurface,
+    ...(browserTrace !== undefined ? { browserTrace } : {}),
     runMetadata: {
       targetUrl: scrapeResult.pageUrl,
       providerName: config.providerName,
@@ -349,11 +400,14 @@ async function run(): Promise<void> {
       contextSize: config.modelContextSize,
       analysisConcurrency,
       localRagEnabled,
+      browserAssisted,
+      browserTraceStatus: browserTrace?.status ?? "disabled",
       ragSummary,
       counts: {
         htmlPages: scrapeResult.htmlPages.length,
         artifacts: formattedArtifacts.length,
         chunks: analysis.analyzedChunkCount,
+        browserRequests: browserTrace?.requests.length ?? 0,
       },
     },
     ...(args.output !== undefined ? { outputPathOverride: args.output } : {}),
@@ -373,6 +427,7 @@ async function run(): Promise<void> {
     ...(isCodexModel(config.model) && selectedModelInfo?.usageLimitsNote ? [`${pc.bold("Codex limits:")} ${selectedModelInfo.usageLimitsNote}`] : []),
     `${pc.bold("Concurrency:")} ${analysisConcurrency}`,
     `${pc.bold("Local RAG:")} ${localRagEnabled ? "enabled" : "disabled"}`,
+    `${pc.bold("Browser trace:")} ${browserTrace?.status ?? (browserAssisted ? "failed" : "disabled")}`,
     ...(ragSummary !== undefined ? [`${pc.bold("RAG segments:")} ${ragSummary.segmentCount}`] : []),
     `${pc.bold("Pages:")} ${scrapeResult.htmlPages.length}`,
     `${pc.bold("Artifacts:")} ${formattedArtifacts.length}`,
@@ -383,6 +438,7 @@ async function run(): Promise<void> {
     `${pc.bold("Captcha flows:")} ${deterministicSurface.captchaFlows.length}`,
     `${pc.bold("Fingerprinting signals:")} ${deterministicSurface.fingerprintingSignals.length}`,
     `${pc.bold("Encryption signals:")} ${deterministicSurface.encryptionSignals.length}`,
+    ...(browserTrace !== undefined ? [`${pc.bold("Browser requests:")} ${browserTrace.requests.length}`] : []),
     ...(analysisError !== undefined ? [`${pc.bold("Analysis error:")} ${analysisError}`] : []),
     `${pc.bold("Repo:")} ${pc.underline("https://github.com/redstone-md/Mapr")}`,
     `${pc.bold("Artifacts dir:")} ${pc.underline(runDirectory)}`,

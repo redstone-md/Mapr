@@ -27,6 +27,9 @@ describe("parseCliArgs", () => {
       "--analysis-concurrency",
       "3",
       "--local-rag",
+      "--browser-assisted",
+      "--browser-timeout-ms",
+      "25000",
       "--max-pages",
       "6",
       "--max-artifacts",
@@ -43,14 +46,17 @@ describe("parseCliArgs", () => {
     expect(args.contextSize).toBe(272000);
     expect(args.analysisConcurrency).toBe(3);
     expect(args.localRag).toBe(true);
+    expect(args.browserAssisted).toBe(true);
+    expect(args.browserTimeoutMs).toBe(25000);
     expect(args.maxPages).toBe(6);
     expect(args.maxArtifacts).toBe(150);
     expect(args.maxDepth).toBe(4);
   });
 
   test("supports explicit local rag disable", () => {
-    const args = parseCliArgs(["--no-local-rag"]);
+    const args = parseCliArgs(["--no-local-rag", "--no-browser-assisted"]);
     expect(args.localRag).toBe(false);
+    expect(args.browserAssisted).toBe(false);
   });
 
   test("builds config overrides without undefined fields", () => {

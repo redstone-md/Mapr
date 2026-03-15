@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import type { BundleAnalysis } from "./analysis-schema";
 import { artifactTypeSchema } from "./artifacts";
+import { browserTraceSchema, type BrowserTrace } from "./browser-trace";
 import { domPageSnapshotSchema, type DomPageSnapshot } from "./dom-snapshot";
 import type { FormattedArtifact } from "./formatter";
 import { deterministicSurfaceSchema, EMPTY_DETERMINISTIC_SURFACE, type DeterministicSurface } from "./surface-analysis";
@@ -64,6 +65,7 @@ const reportInputSchema = z.object({
     analyzedChunkCount: z.number().int().nonnegative(),
   }),
   deterministicSurface: deterministicSurfaceSchema.default(EMPTY_DETERMINISTIC_SURFACE),
+  browserTrace: browserTraceSchema.optional(),
 });
 
 type ReportInput = z.input<typeof reportInputSchema>;
@@ -240,6 +242,53 @@ function formatDeterministicSurface(surface: DeterministicSurface): string[] {
   ];
 }
 
+function formatBrowserTrace(trace: BrowserTrace | undefined): string[] {
+  if (!trace) {
+    return ["## Browser-Assisted Trace", "", "- Browser-assisted tracing was not used.", ""];
+  }
+
+  const requestLines =
+    trace.requests.length > 0
+      ? trace.requests
+          .slice(0, 20)
+          .map(
+            (request) =>
+              `- ${request.method} ${request.url} [${request.resourceType}]${request.status !== undefined ? ` -> ${request.status}` : ""}${
+                request.requestBodySnippet ? ` body: ${request.requestBodySnippet}` : ""
+              }`,
+          )
+          .join("\n")
+      : "- No runtime requests recorded.";
+  const consoleLines =
+    trace.consoleMessages.length > 0
+      ? trace.consoleMessages.map((entry) => `- [${entry.type}] ${entry.text}`).join("\n")
+      : "- No console messages captured.";
+
+  return [
+    "## Browser-Assisted Trace",
+    "",
+    `- Status: ${trace.status}`,
+    ...(trace.finalUrl ? [`- Final URL: ${trace.finalUrl}`] : []),
+    `- Frames observed: ${trace.frameUrls.length}`,
+    `- Requests captured: ${trace.requests.length}`,
+    `- Captcha providers: ${trace.runtimeSignals.captchaProviders.join(", ") || "none"}`,
+    `- Auth runtime requests: ${trace.runtimeSignals.authRequestUrls.length}`,
+    `- Challenge runtime requests: ${trace.runtimeSignals.challengeRequestUrls.length}`,
+    `- Fingerprinting runtime requests: ${trace.runtimeSignals.fingerprintingRequestUrls.length}`,
+    ...(trace.error ? [`- Error: ${trace.error}`] : []),
+    "",
+    "### Runtime Requests",
+    "",
+    requestLines,
+    "",
+    "### Console And Page Errors",
+    "",
+    consoleLines,
+    ...(trace.pageErrors.length > 0 ? ["", ...trace.pageErrors.map((entry) => `- pageerror: ${entry}`)] : []),
+    "",
+  ];
+}
+
 export class ReportWriter {
   public generateMarkdown(input: ReportInput): string {
     const report = reportInputSchema.parse(input);
@@ -298,6 +347,7 @@ export class ReportWriter {
       "",
       formatDomSnapshots(report.domSnapshots),
       "",
+      ...formatBrowserTrace(report.browserTrace),
       ...formatDeterministicSurface(report.deterministicSurface),
       "## Executive Summary",
       "",
@@ -352,6 +402,7 @@ export class ReportWriter {
     artifacts: FormattedArtifact[];
     analysis: BundleAnalysis;
     deterministicSurface: DeterministicSurface;
+    browserTrace?: BrowserTrace;
     outputPathOverride?: string;
   }): Promise<string> {
     const { outputPathOverride, ...reportInput } = input;

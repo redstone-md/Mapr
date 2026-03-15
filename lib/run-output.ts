@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import type { BundleAnalysis } from "./analysis-schema";
 import { artifactTypeSchema } from "./artifacts";
+import { browserTraceSchema, type BrowserTrace } from "./browser-trace";
 import { deterministicSurfaceSchema, type DeterministicSurface } from "./surface-analysis";
 import { domPageSnapshotSchema, type DomPageSnapshot } from "./dom-snapshot";
 import type { FormattedArtifact } from "./formatter";
@@ -30,6 +31,7 @@ const runOutputInputSchema = z.object({
   ),
   analysis: z.custom<BundleAnalysis>(),
   deterministicSurface: deterministicSurfaceSchema,
+  browserTrace: browserTraceSchema.optional(),
   outputPathOverride: z.string().optional(),
   runMetadata: z.record(z.string(), z.unknown()).default({}),
 });
@@ -96,6 +98,7 @@ function buildRunReadme(input: {
     "- `report.md` or the requested Markdown output",
     "- `report.html` interactive HTML report with code-map browser and manifest explorer",
     "- `metadata.json` high-level run metadata",
+    "- `browser-trace.json` Playwright runtime trace when enabled",
     "- `deterministic-surface.json` API/auth/captcha/fingerprinting/encryption findings",
     "- `dom-snapshots.json` static DOM snapshots",
     "- `artifacts/index.json` artifact manifest",
@@ -117,6 +120,7 @@ export class RunArtifactsWriter {
     artifacts: FormattedArtifact[];
     analysis: BundleAnalysis;
     deterministicSurface: DeterministicSurface;
+    browserTrace?: BrowserTrace;
     outputPathOverride?: string;
     runMetadata?: Record<string, unknown>;
   }): Promise<{ runDirectory: string; reportPath: string }> {
@@ -136,6 +140,7 @@ export class RunArtifactsWriter {
       artifacts: validated.artifacts,
       analysis: validated.analysis,
       deterministicSurface: validated.deterministicSurface,
+      ...(validated.browserTrace !== undefined ? { browserTrace: validated.browserTrace } : {}),
     });
     const htmlReport = this.htmlReportBuilder.generate({
       targetUrl: validated.targetUrl,
@@ -145,6 +150,7 @@ export class RunArtifactsWriter {
       artifacts: validated.artifacts,
       analysis: validated.analysis,
       deterministicSurface: validated.deterministicSurface,
+      ...(validated.browserTrace !== undefined ? { browserTrace: validated.browserTrace } : {}),
       ...(validated.analysisError !== undefined ? { analysisError: validated.analysisError } : {}),
     });
     await writeFile(reportPath, `${markdown}\n`, "utf8");
@@ -170,6 +176,7 @@ export class RunArtifactsWriter {
     await Promise.all([
       writeFile(join(runDirectory, "artifacts", "index.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8"),
       writeFile(join(runDirectory, "metadata.json"), `${JSON.stringify(validated.runMetadata, null, 2)}\n`, "utf8"),
+      writeFile(join(runDirectory, "browser-trace.json"), `${JSON.stringify(validated.browserTrace ?? null, null, 2)}\n`, "utf8"),
       writeFile(join(runDirectory, "dom-snapshots.json"), `${JSON.stringify(validated.domSnapshots, null, 2)}\n`, "utf8"),
       writeFile(join(runDirectory, "deterministic-surface.json"), `${JSON.stringify(validated.deterministicSurface, null, 2)}\n`, "utf8"),
       writeFile(join(runDirectory, "report.html"), `${htmlReport}\n`, "utf8"),

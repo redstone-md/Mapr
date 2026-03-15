@@ -18,6 +18,7 @@ This repository is public for source visibility and collaboration. The license r
 - JS bundle, worker, service worker, WASM, and source-map discovery
 - Iframe-aware crawling for same-origin embedded pages
 - Deterministic extraction of REST, Swagger/OpenAPI, GraphQL, auth, captcha, fingerprinting, and encryption surface
+- Optional Playwright browser-assisted tracing for post-hydration DOM, runtime network activity, cookies, storage, and challenge flows
 - Streaming AI generation with live throughput updates in the TUI
 - Local RAG mode for multi-megabyte bundles
 - Partial-report persistence when analysis fails mid-run
@@ -32,6 +33,7 @@ This repository is public for source visibility and collaboration. The license r
 - Source maps and extracted original sources when available
 - Same-origin iframe pages and the JS/WASM artifacts discovered inside them
 - Optional local lexical RAG for oversized artifacts such as multi-megabyte bundles
+- Optional browser-assisted runtime behavior after hydration through Playwright
 
 Mapr does not analyze images, fonts, audio, video, PDFs, archives, or other presentation/binary assets.
 
@@ -52,6 +54,7 @@ Local development:
 
 ```bash
 bun install
+bunx playwright install chromium
 bun run index.ts
 ```
 
@@ -68,9 +71,10 @@ npx @redstone-md/mapr --help
 3. Let the user search and select a model, auto-detect the model context size when possible, and fall back to a manual prompt when needed
 4. Crawl the target website, same-origin iframe pages, and discovered code artifacts with bounded page count and crawl depth
 5. Format analyzable content where possible
-6. Optionally build a local lexical RAG index for oversized artifacts
-7. Run a communicating swarm of analysis agents over chunked artifact content through streaming JSON generation so long-running requests keep producing output
-8. Generate a run directory containing the Markdown report, metadata, DOM snapshots, deterministic findings, and raw/formatted artifacts
+6. Optionally run a browser-assisted Playwright trace for post-hydration DOM, runtime network activity, cookies, storage, and challenge flow observation
+7. Optionally build a local lexical RAG index for oversized artifacts
+8. Run a communicating swarm of analysis agents over chunked artifact content through streaming JSON generation so long-running requests keep producing output
+9. Generate a run directory containing the Markdown report, HTML report, metadata, DOM snapshots, runtime trace, deterministic findings, and raw/formatted artifacts
 
 ## Provider Presets
 
@@ -105,6 +109,7 @@ npx @redstone-md/mapr \
   --api-key secret \
   --model mistralai/devstral-small-2507 \
   --context-size 512000 \
+  --browser-assisted \
   --local-rag \
   --max-depth 3
 ```
@@ -132,6 +137,8 @@ Useful flags:
 - `--max-artifacts <n>` limits total fetched analyzable artifacts
 - `--max-depth <n>` limits crawler hop depth from the entry page
 - `--local-rag` enables local lexical retrieval for oversized bundles
+- `--browser-assisted` enables Playwright post-hydration tracing
+- `--browser-timeout-ms <ms>` overrides the Playwright trace timeout
 - `--verbose-agents` prints swarm completion events as they finish
 - `--reconfigure` forces provider setup even if config already exists
 
@@ -168,12 +175,22 @@ The run directory contains:
 - `report.html`
 - `README.md`
 - `metadata.json`
+- `browser-trace.json`
 - `dom-snapshots.json`
 - `deterministic-surface.json`
 - `artifacts/raw/*`
 - `artifacts/formatted/*`
 
 The HTML report is self-contained and includes an interactive code-map browser, searchable function/symbol surface, API/auth/captcha/fingerprinting sections, and an artifact manifest view for faster engineering triage.
+
+When browser-assisted mode is enabled, Mapr also captures a Playwright runtime trace with:
+
+- final navigated URL after hydration or redirects
+- frame URLs
+- runtime requests and status codes
+- auth/challenge/fingerprinting endpoint hints
+- cookies and storage keys
+- console errors and page errors
 
 If analysis fails after artifact discovery or formatting has already completed, Mapr still writes a partial run directory and includes the analysis error in the report.
 
