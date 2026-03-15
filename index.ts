@@ -9,7 +9,7 @@ import { AiBundleAnalyzer, chunkTextByBytes, deriveChunkSizeBytes } from "./lib/
 import { getConfigOverrides, parseCliArgs, renderHelpText } from "./lib/cli-args";
 import { ConfigManager } from "./lib/config";
 import { BundleFormatter } from "./lib/formatter";
-import { renderProgressBar } from "./lib/progress";
+import { renderAdaptiveAnalysisProgressLine, renderProgressBar } from "./lib/progress";
 import { findKnownModelInfo, isCodexModel } from "./lib/provider";
 import { ReportWriter } from "./lib/reporter";
 import { BundleScraper } from "./lib/scraper";
@@ -178,6 +178,7 @@ async function run(): Promise<void> {
   const analysisConcurrency = await resolveAnalysisConcurrency(headless, args.analysisConcurrency, totalChunks);
   const totalAgentTasks = Math.max(1, totalChunks * SWARM_AGENT_ORDER.length);
   let completedAgentTasks = 0;
+  const analysisStartedAt = Date.now();
 
   const analysisStep = spinner({ indicator: "timer" });
   analysisStep.start(formatAnalysisProgress(0, totalAgentTasks, `Starting swarm analysis (${analysisConcurrency} lane${analysisConcurrency === 1 ? "" : "s"})`));
@@ -191,7 +192,24 @@ async function run(): Promise<void> {
         completedAgentTasks += 1;
       }
 
-      const progressLine = formatAnalysisProgress(completedAgentTasks, totalAgentTasks, event.message);
+      const progressLine =
+        event.stage === "agent" && event.agent
+          ? renderAdaptiveAnalysisProgressLine({
+              completed: completedAgentTasks,
+              total: totalAgentTasks,
+              elapsedMs: Date.now() - analysisStartedAt,
+              agent: event.agent,
+              state: event.state,
+              artifactUrl: event.artifactUrl,
+              ...(event.chunkIndex !== undefined ? { chunkIndex: event.chunkIndex } : {}),
+              ...(event.chunkCount !== undefined ? { chunkCount: event.chunkCount } : {}),
+              ...(event.estimatedOutputTokens !== undefined
+                ? { estimatedOutputTokens: event.estimatedOutputTokens }
+                : {}),
+              ...(event.outputTokens !== undefined ? { outputTokens: event.outputTokens } : {}),
+              ...(event.tokensPerSecond !== undefined ? { tokensPerSecond: event.tokensPerSecond } : {}),
+            })
+          : formatAnalysisProgress(completedAgentTasks, totalAgentTasks, event.message);
       analysisStep.message(progressLine);
 
       if (args.verboseAgents && event.stage === "agent" && event.state === "completed") {
