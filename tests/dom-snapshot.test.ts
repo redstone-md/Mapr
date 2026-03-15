@@ -43,4 +43,29 @@ describe("DomSnapshotBuilder", () => {
     expect(snapshot.inlineStateHints).toContain("global:__INITIAL_STATE__");
     expect(snapshot.dataAttributeKeys).toContain("data-testid");
   });
+
+  test("does not crash on stylesheet-heavy pages", () => {
+    const builder = new DomSnapshotBuilder();
+    const snapshot = builder.build(
+      `
+        <html>
+          <head>
+            <title>Styled Login</title>
+            <link rel="stylesheet" href="https://cdn.example.com/app.css" />
+            <script>window.__BOOTSTRAP__ = { route: "login" };</script>
+          </head>
+          <body>
+            <form action="/login" method="post">
+              <input type="text" name="login" />
+            </form>
+          </body>
+        </html>
+      `,
+      "https://example.com/login.html",
+    );
+
+    expect(snapshot.url).toBe("https://example.com/login.html");
+    expect(snapshot.inlineStateHints).toContain("global:__BOOTSTRAP__");
+    expect(snapshot.summary.length).toBeGreaterThan(0);
+  });
 });

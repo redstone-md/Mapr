@@ -102,93 +102,119 @@ function summarizeSnapshot(input: Omit<DomPageSnapshot, "summary">): string {
 
 export class DomSnapshotBuilder {
   public build(html: string, pageUrl: string): DomPageSnapshot {
-    const window = new Window({
-      url: pageUrl,
-      settings: {
-        disableJavaScriptEvaluation: true,
-        disableJavaScriptFileLoading: true,
-      },
-    });
-    const document = window.document;
-    document.write(html);
-    const headings = getElementsByTags(document, ["h1", "h2", "h3"])
-      .map((element) => normalizeText(element.textContent))
-      .filter((value): value is string => value !== undefined)
-      .slice(0, 12);
-    const buttons = [
-      ...getElementsByTags(document, ["button"]),
-      ...getElementsByTags(document, ["input"]).filter((element) => ["submit", "button"].includes((element.getAttribute("type") ?? "").toLowerCase())),
-    ]
-      .map((element) => extractControlLabel(element as ElementLike & Partial<{ value: string }>))
-      .filter((value): value is string => value !== undefined)
-      .slice(0, 20);
-    const links = getElementsByTags(document, ["a"])
-      .filter((element) => normalizeText(element.getAttribute("href")) !== undefined)
-      .map((element) => normalizeText(element.textContent) ?? normalizeText(element.getAttribute("aria-label")))
-      .filter((value): value is string => value !== undefined)
-      .slice(0, 20);
-    const iframes = getElementsByTags(document, ["iframe"])
-      .filter((element) => normalizeText(element.getAttribute("src")) !== undefined)
-      .map((element) => toAbsoluteUrl(element.getAttribute("src"), pageUrl))
-      .filter((value): value is string => value !== undefined)
-      .slice(0, 10);
-    const dataAttributeKeys = getElementsByTags(document, ["*"])
-      .flatMap((element) => Object.keys(element.dataset ?? {}))
-      .map((key) => `data-${key.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`)}`)
-      .filter((value, index, array) => array.indexOf(value) === index)
-      .slice(0, 24);
-    const forms = getElementsByTags(document, ["form"]).map((form) => {
-      const formNode = form as unknown as ParentLike;
-      const inputNames = [
-        ...getElementsByTags(formNode, ["input"]),
-        ...getElementsByTags(formNode, ["textarea", "select"]),
-      ]
-        .filter((element) => normalizeText(element.getAttribute("name")) !== undefined)
-        .map((element) => normalizeText(element.getAttribute("name")))
+    try {
+      const window = new Window({
+        url: pageUrl,
+        settings: {
+          disableJavaScriptEvaluation: true,
+          disableJavaScriptFileLoading: true,
+          disableCSSFileLoading: true,
+          disableComputedStyleRendering: true,
+          handleDisabledFileLoadingAsSuccess: true,
+        },
+      });
+      const document = window.document;
+      document.write(html);
+      const headings = getElementsByTags(document, ["h1", "h2", "h3"])
+        .map((element) => normalizeText(element.textContent))
         .filter((value): value is string => value !== undefined)
-        .slice(0, 20);
-      const inputTypes = getElementsByTags(formNode, ["input"])
-        .filter((element) => normalizeText(element.getAttribute("type")) !== undefined)
-        .map((element) => normalizeText(element.getAttribute("type")))
-        .filter((value): value is string => value !== undefined)
-        .slice(0, 20);
-      const submitLabels = [
-        ...getElementsByTags(formNode, ["button"]),
-        ...getElementsByTags(formNode, ["input"]).filter(
-          (element) => (element.getAttribute("type") ?? "").toLowerCase() === "submit",
-        ),
+        .slice(0, 12);
+      const buttons = [
+        ...getElementsByTags(document, ["button"]),
+        ...getElementsByTags(document, ["input"]).filter((element) => ["submit", "button"].includes((element.getAttribute("type") ?? "").toLowerCase())),
       ]
         .map((element) => extractControlLabel(element as ElementLike & Partial<{ value: string }>))
         .filter((value): value is string => value !== undefined)
-        .slice(0, 8);
+        .slice(0, 20);
+      const links = getElementsByTags(document, ["a"])
+        .filter((element) => normalizeText(element.getAttribute("href")) !== undefined)
+        .map((element) => normalizeText(element.textContent) ?? normalizeText(element.getAttribute("aria-label")))
+        .filter((value): value is string => value !== undefined)
+        .slice(0, 20);
+      const iframes = getElementsByTags(document, ["iframe"])
+        .filter((element) => normalizeText(element.getAttribute("src")) !== undefined)
+        .map((element) => toAbsoluteUrl(element.getAttribute("src"), pageUrl))
+        .filter((value): value is string => value !== undefined)
+        .slice(0, 10);
+      const dataAttributeKeys = getElementsByTags(document, ["*"])
+        .flatMap((element) => Object.keys(element.dataset ?? {}))
+        .map((key) => `data-${key.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`)}`)
+        .filter((value, index, array) => array.indexOf(value) === index)
+        .slice(0, 24);
+      const forms = getElementsByTags(document, ["form"]).map((form) => {
+        const formNode = form as unknown as ParentLike;
+        const inputNames = [
+          ...getElementsByTags(formNode, ["input"]),
+          ...getElementsByTags(formNode, ["textarea", "select"]),
+        ]
+          .filter((element) => normalizeText(element.getAttribute("name")) !== undefined)
+          .map((element) => normalizeText(element.getAttribute("name")))
+          .filter((value): value is string => value !== undefined)
+          .slice(0, 20);
+        const inputTypes = getElementsByTags(formNode, ["input"])
+          .filter((element) => normalizeText(element.getAttribute("type")) !== undefined)
+          .map((element) => normalizeText(element.getAttribute("type")))
+          .filter((value): value is string => value !== undefined)
+          .slice(0, 20);
+        const submitLabels = [
+          ...getElementsByTags(formNode, ["button"]),
+          ...getElementsByTags(formNode, ["input"]).filter(
+            (element) => (element.getAttribute("type") ?? "").toLowerCase() === "submit",
+          ),
+        ]
+          .map((element) => extractControlLabel(element as ElementLike & Partial<{ value: string }>))
+          .filter((value): value is string => value !== undefined)
+          .slice(0, 8);
 
-      return {
-        action: toAbsoluteUrl(form.getAttribute("action"), pageUrl) ?? pageUrl,
-        method: normalizeText(form.getAttribute("method"))?.toUpperCase() ?? "GET",
-        inputNames,
-        inputTypes,
-        submitLabels,
+        return {
+          action: toAbsoluteUrl(form.getAttribute("action"), pageUrl) ?? pageUrl,
+          method: normalizeText(form.getAttribute("method"))?.toUpperCase() ?? "GET",
+          inputNames,
+          inputTypes,
+          submitLabels,
+        };
+      });
+
+      const description = normalizeText(
+        getElementsByTags(document, ["meta"]).find((element) => (element.getAttribute("name") ?? "").toLowerCase() === "description")?.getAttribute("content"),
+      );
+      const snapshot = {
+        url: pageUrl,
+        title: normalizeText(document.title) ?? "",
+        headings,
+        ...(description !== undefined ? { description } : {}),
+        forms,
+        buttons,
+        links,
+        iframes,
+        inlineStateHints: extractInlineStateHints(html),
+        dataAttributeKeys,
       };
-    });
 
-    const snapshot = {
-      url: pageUrl,
-      title: normalizeText(document.title) ?? "",
-      headings,
-      ...(normalizeText(getElementsByTags(document, ["meta"]).find((element) => (element.getAttribute("name") ?? "").toLowerCase() === "description")?.getAttribute("content")) !== undefined
-        ? { description: normalizeText(getElementsByTags(document, ["meta"]).find((element) => (element.getAttribute("name") ?? "").toLowerCase() === "description")?.getAttribute("content"))! }
-        : {}),
-      forms,
-      buttons,
-      links,
-      iframes,
-      inlineStateHints: extractInlineStateHints(html),
-      dataAttributeKeys,
-    };
+      return domPageSnapshotSchema.parse({
+        ...snapshot,
+        summary: summarizeSnapshot(snapshot),
+      });
+    } catch {
+      const fallbackSnapshot = {
+        url: pageUrl,
+        title: "",
+        headings: [],
+        forms: [],
+        buttons: [],
+        links: [],
+        iframes: [],
+        inlineStateHints: extractInlineStateHints(html),
+        dataAttributeKeys: [],
+      };
 
-    return domPageSnapshotSchema.parse({
-      ...snapshot,
-      summary: summarizeSnapshot(snapshot),
-    });
+      return domPageSnapshotSchema.parse({
+        ...fallbackSnapshot,
+        summary:
+          fallbackSnapshot.inlineStateHints.length > 0
+            ? `Fallback DOM snapshot with ${fallbackSnapshot.inlineStateHints.length} inline state hint(s)`
+            : "Fallback DOM snapshot only.",
+      });
+    }
   }
 }
