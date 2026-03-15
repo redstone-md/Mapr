@@ -1,6 +1,15 @@
-import * as cheerio from "cheerio";
 import { Buffer } from "buffer";
 import { z } from "zod";
+
+import {
+  artifactCandidateSchema,
+  discoveredArtifactSchema,
+  extractArtifactCandidates,
+  extractNestedCandidates,
+  type ArtifactCandidate,
+  type DiscoveredArtifact,
+} from "./artifacts";
+import { WasmModuleSummarizer } from "./wasm";
 
 const httpUrlSchema = z
   .string()
@@ -8,96 +17,153 @@ const httpUrlSchema = z
   .url("Expected a valid URL.")
   .refine((value) => /^https?:\/\//.test(value), "Expected an http or https URL.");
 
-const scriptBundleSchema = z.object({
-  url: httpUrlSchema,
-  rawCode: z.string(),
-  sizeBytes: z.number().int().nonnegative(),
+const scraperOptionsSchema = z.object({
+  maxPages: z.number().int().positive().default(10),
+  maxArtifacts: z.number().int().positive().default(200),
 });
-
-export type ScriptBundle = z.infer<typeof scriptBundleSchema>;
 
 export interface ScrapeResult {
   pageUrl: string;
-  html: string;
+  artifacts: DiscoveredArtifact[];
+  htmlPages: string[];
   scriptUrls: string[];
-  bundles: ScriptBundle[];
 }
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+type ScraperOptions = z.input<typeof scraperOptionsSchema>;
 
-export function extractScriptUrls(html: string, pageUrl: string): string[] {
-  const validatedHtml = z.string().parse(html);
-  const baseUrl = httpUrlSchema.parse(pageUrl);
-  const $ = cheerio.load(validatedHtml);
-  const discoveredUrls = new Set<string>();
+function isPageCandidate(candidate: ArtifactCandidate, rootOrigin: string): boolean {
+  return candidate.type === "html" && new URL(candidate.url).origin === rootOrigin;
+}
 
-  $("script[src]").each((_, element) => {
-    const src = $(element).attr("src")?.trim();
-    if (!src) {
-      return;
-    }
+function shouldFollowCandidate(candidate: ArtifactCandidate, rootOrigin: string): boolean {
+  if (candidate.type === "html") {
+    return new URL(candidate.url).origin === rootOrigin;
+  }
 
-    try {
-      const absoluteUrl = new URL(src, baseUrl).toString();
-      const validatedUrl = httpUrlSchema.safeParse(absoluteUrl);
-      if (validatedUrl.success) {
-        discoveredUrls.add(validatedUrl.data);
-      }
-    } catch {
-      return;
-    }
-  });
-
-  return [...discoveredUrls];
+  return true;
 }
 
 export class BundleScraper {
-  public constructor(private readonly fetcher: FetchLike = fetch) {}
+  private readonly options: z.infer<typeof scraperOptionsSchema>;
+  private readonly wasmSummarizer = new WasmModuleSummarizer();
+
+  public constructor(
+    private readonly fetcher: FetchLike = fetch,
+    options: ScraperOptions = {},
+  ) {
+    this.options = scraperOptionsSchema.parse(options);
+  }
 
   public async scrape(pageUrl: string): Promise<ScrapeResult> {
     const validatedPageUrl = httpUrlSchema.parse(pageUrl);
-    const html = await this.fetchText(validatedPageUrl, "HTML document");
-    const scriptUrls = extractScriptUrls(html, validatedPageUrl);
-    const bundles: ScriptBundle[] = [];
+    const rootOrigin = new URL(validatedPageUrl).origin;
+    const visitedUrls = new Set<string>();
+    const htmlPages = new Set<string>();
+    const artifacts: DiscoveredArtifact[] = [];
+    const queue: ArtifactCandidate[] = [
+      artifactCandidateSchema.parse({
+        url: validatedPageUrl,
+        type: "html",
+        discoveredFrom: "root",
+      }),
+    ];
 
-    for (const scriptUrl of scriptUrls) {
-      const rawCode = await this.fetchText(scriptUrl, `bundle ${scriptUrl}`);
-      bundles.push(
-        scriptBundleSchema.parse({
-          url: scriptUrl,
-          rawCode,
-          sizeBytes: Buffer.byteLength(rawCode, "utf8"),
-        }),
-      );
+    while (queue.length > 0) {
+      if (artifacts.length >= this.options.maxArtifacts) {
+        break;
+      }
+
+      const candidate = queue.shift();
+      if (!candidate || visitedUrls.has(candidate.url)) {
+        continue;
+      }
+
+      if (!shouldFollowCandidate(candidate, rootOrigin)) {
+        continue;
+      }
+
+      if (isPageCandidate(candidate, rootOrigin) && htmlPages.size >= this.options.maxPages && candidate.url !== validatedPageUrl) {
+        continue;
+      }
+
+      visitedUrls.add(candidate.url);
+      const artifact = await this.fetchArtifact(candidate);
+      artifacts.push(artifact);
+
+      if (artifact.type === "html") {
+        htmlPages.add(artifact.url);
+      }
+
+      const nestedCandidates = extractNestedCandidates(artifact);
+      for (const nestedCandidate of nestedCandidates) {
+        if (!visitedUrls.has(nestedCandidate.url)) {
+          queue.push(nestedCandidate);
+        }
+      }
     }
 
     return {
       pageUrl: validatedPageUrl,
-      html,
-      scriptUrls,
-      bundles,
+      artifacts,
+      htmlPages: [...htmlPages],
+      scriptUrls: artifacts
+        .filter((artifact) => artifact.type === "script" || artifact.type === "service-worker" || artifact.type === "worker")
+        .map((artifact) => artifact.url),
     };
   }
 
-  private async fetchText(url: string, resourceLabel: string): Promise<string> {
+  private async fetchArtifact(candidate: ArtifactCandidate): Promise<DiscoveredArtifact> {
+    const response = await this.fetchResponse(candidate.url, candidate.type);
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+
+    if (candidate.type === "wasm" || contentType.includes("application/wasm")) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return discoveredArtifactSchema.parse({
+        url: candidate.url,
+        type: "wasm",
+        sizeBytes: bytes.byteLength,
+        content: this.wasmSummarizer.summarize({
+          url: candidate.url,
+          bytes,
+        }),
+        discoveredFrom: candidate.discoveredFrom,
+      });
+    }
+
+    const content = await response.text();
+    const resolvedType = contentType.includes("text/html") ? "html" : candidate.type;
+
+    return discoveredArtifactSchema.parse({
+      url: candidate.url,
+      type: resolvedType,
+      sizeBytes: Buffer.byteLength(content, "utf8"),
+      content,
+      discoveredFrom: candidate.discoveredFrom,
+    });
+  }
+
+  private async fetchResponse(url: string, artifactType: ArtifactCandidate["type"]): Promise<Response> {
     try {
       const response = await this.fetcher(url, {
         headers: {
-          "user-agent": "mapr/0.1.0",
+          "user-agent": "mapr/0.2.0",
         },
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to fetch ${resourceLabel} from ${url}: ${response.status} ${response.statusText}`);
+        throw new Error(`Failed to fetch ${artifactType} from ${url}: ${response.status} ${response.statusText}`);
       }
 
-      return await response.text();
+      return response;
     } catch (error) {
       if (error instanceof Error) {
-        throw new Error(`Unable to fetch ${resourceLabel}: ${error.message}`);
+        throw new Error(`Unable to fetch ${artifactType} artifact ${url}: ${error.message}`);
       }
 
-      throw new Error(`Unable to fetch ${resourceLabel}.`);
+      throw new Error(`Unable to fetch ${artifactType} artifact ${url}.`);
     }
   }
 }
+
+export { extractArtifactCandidates };

@@ -1,17 +1,12 @@
-import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
 import { Buffer } from "buffer";
 import { z } from "zod";
 
-import type { FormattedBundle } from "./formatter";
+import { artifactTypeSchema } from "./artifacts";
+import type { FormattedArtifact } from "./formatter";
+import { AiProviderClient, type AiProviderConfig } from "./provider";
 
 export const DEFAULT_CHUNK_SIZE_BYTES = 80 * 1024;
-
-const renamedSymbolSchema = z.object({
-  originalName: z.string().min(1),
-  suggestedName: z.string().min(1),
-  justification: z.string().min(1),
-});
 
 const entryPointSchema = z.object({
   symbol: z.string().min(1),
@@ -25,6 +20,12 @@ const callGraphEdgeSchema = z.object({
   rationale: z.string().min(1),
 });
 
+const renamedSymbolSchema = z.object({
+  originalName: z.string().min(1),
+  suggestedName: z.string().min(1),
+  justification: z.string().min(1),
+});
+
 const chunkAnalysisSchema = z.object({
   entryPoints: z.array(entryPointSchema).default([]),
   initializationFlow: z.array(z.string().min(1)).default([]),
@@ -32,7 +33,15 @@ const chunkAnalysisSchema = z.object({
   restoredNames: z.array(renamedSymbolSchema).default([]),
   summary: z.string().min(1),
   notableLibraries: z.array(z.string().min(1)).default([]),
+  investigationTips: z.array(z.string().min(1)).default([]),
   risks: z.array(z.string().min(1)).default([]),
+});
+
+const artifactSummarySchema = z.object({
+  url: z.string().url(),
+  type: artifactTypeSchema,
+  chunkCount: z.number().int().nonnegative(),
+  summary: z.string().min(1),
 });
 
 const finalAnalysisSchema = z.object({
@@ -42,41 +51,45 @@ const finalAnalysisSchema = z.object({
   callGraph: z.array(callGraphEdgeSchema).default([]),
   restoredNames: z.array(renamedSymbolSchema).default([]),
   notableLibraries: z.array(z.string().min(1)).default([]),
+  investigationTips: z.array(z.string().min(1)).default([]),
   risks: z.array(z.string().min(1)).default([]),
-  bundleSummaries: z.array(
-    z.object({
-      url: z.string().url(),
-      chunkCount: z.number().int().nonnegative(),
-      summary: z.string().min(1),
-    }),
-  ),
+  artifactSummaries: z.array(artifactSummarySchema),
   analyzedChunkCount: z.number().int().nonnegative(),
 });
 
 const analyzerOptionsSchema = z.object({
-  apiKey: z.string().min(20),
-  model: z.string().min(1).default("gpt-4.1-mini"),
+  providerConfig: z.object({
+    providerType: z.enum(["openai", "openai-compatible"]),
+    providerName: z.string().min(1),
+    apiKey: z.string().min(1),
+    baseURL: z.string().url(),
+    model: z.string().min(1),
+  }),
   chunkSizeBytes: z.number().int().positive().max(100 * 1024).default(DEFAULT_CHUNK_SIZE_BYTES),
 });
 
 const analyzeInputSchema = z.object({
   pageUrl: z.string().url(),
-  bundles: z.array(
+  artifacts: z.array(
     z.object({
       url: z.string().url(),
-      rawCode: z.string(),
-      formattedCode: z.string(),
+      type: artifactTypeSchema,
+      content: z.string(),
+      formattedContent: z.string(),
       sizeBytes: z.number().int().nonnegative(),
+      discoveredFrom: z.string().min(1),
       formattingSkipped: z.boolean(),
       formattingNote: z.string().optional(),
     }),
   ),
 });
 
-export type ChunkAnalysis = z.infer<typeof chunkAnalysisSchema>;
 export type BundleAnalysis = z.infer<typeof finalAnalysisSchema>;
 
-type AnalyzerOptions = z.input<typeof analyzerOptionsSchema>;
+type AnalyzerOptions = {
+  providerConfig: AiProviderConfig;
+  chunkSizeBytes?: number;
+};
 
 function findSplitBoundary(source: string, start: number, end: number): number {
   const minimumPreferredIndex = start + Math.max(1, Math.floor((end - start) * 0.6));
@@ -122,7 +135,7 @@ export function chunkTextByBytes(source: string, maxBytes = DEFAULT_CHUNK_SIZE_B
   return chunks;
 }
 
-function deduplicateObjects<T>(items: T[], keySelector: (item: T) => string): T[] {
+function deduplicate<T>(items: T[], keySelector: (item: T) => string): T[] {
   const seen = new Set<string>();
   const deduplicated: T[] = [];
 
@@ -146,11 +159,11 @@ function normalizeAiError(error: unknown): Error {
 
   const message = error.message.toLowerCase();
   if (message.includes("rate limit")) {
-    return new Error("OpenAI rate limit hit during analysis. Please retry in a moment.");
+    return new Error("Provider rate limit hit during analysis. Please retry in a moment.");
   }
 
   if (message.includes("api key")) {
-    return new Error("OpenAI rejected the configured API key.");
+    return new Error("The configured API key was rejected by the provider.");
   }
 
   return error;
@@ -158,64 +171,61 @@ function normalizeAiError(error: unknown): Error {
 
 export class AiBundleAnalyzer {
   private readonly options: z.infer<typeof analyzerOptionsSchema>;
-  private readonly openai;
+  private readonly providerClient: AiProviderClient;
 
   public constructor(options: AnalyzerOptions) {
     this.options = analyzerOptionsSchema.parse(options);
-    this.openai = createOpenAI({ apiKey: this.options.apiKey });
+    this.providerClient = new AiProviderClient(this.options.providerConfig);
   }
 
-  public async analyze(input: { pageUrl: string; bundles: FormattedBundle[] }): Promise<BundleAnalysis> {
+  public async analyze(input: { pageUrl: string; artifacts: FormattedArtifact[] }): Promise<BundleAnalysis> {
     const validatedInput = analyzeInputSchema.parse(input);
 
-    if (validatedInput.bundles.length === 0) {
+    if (validatedInput.artifacts.length === 0) {
       return finalAnalysisSchema.parse({
-        overview: "No external JavaScript bundles were discovered on the target page.",
+        overview: "No analyzable website artifacts were discovered on the target page.",
         entryPoints: [],
         initializationFlow: [],
         callGraph: [],
         restoredNames: [],
         notableLibraries: [],
+        investigationTips: [],
         risks: [],
-        bundleSummaries: [],
+        artifactSummaries: [],
         analyzedChunkCount: 0,
       });
     }
 
     try {
-      const bundleSummaries: Array<{ url: string; chunkCount: number; summary: string }> = [];
-      const chunkAnalyses: ChunkAnalysis[] = [];
+      const chunkAnalyses: Array<z.infer<typeof chunkAnalysisSchema>> = [];
+      const artifactSummaries: Array<z.infer<typeof artifactSummarySchema>> = [];
 
-      for (const bundle of validatedInput.bundles) {
-        const chunkSource = bundle.formattedCode || bundle.rawCode;
-        const chunks = chunkTextByBytes(chunkSource, this.options.chunkSizeBytes);
-        const bundleChunkAnalyses: ChunkAnalysis[] = [];
+      for (const artifact of validatedInput.artifacts) {
+        const chunks = chunkTextByBytes(artifact.formattedContent || artifact.content, this.options.chunkSizeBytes);
+        const perArtifactChunkAnalyses: Array<z.infer<typeof chunkAnalysisSchema>> = [];
 
-        for (let index = 0; index < chunks.length; index += 1) {
+        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
           const analysis = await this.analyzeChunk({
             pageUrl: validatedInput.pageUrl,
-            bundle,
-            chunk: chunks[index] ?? "",
-            chunkIndex: index,
+            artifact,
+            chunk: chunks[chunkIndex] ?? "",
+            chunkIndex,
             totalChunks: chunks.length,
           });
 
           chunkAnalyses.push(analysis);
-          bundleChunkAnalyses.push(analysis);
+          perArtifactChunkAnalyses.push(analysis);
         }
 
-        bundleSummaries.push({
-          url: bundle.url,
+        artifactSummaries.push({
+          url: artifact.url,
+          type: artifact.type,
           chunkCount: chunks.length,
-          summary: bundleChunkAnalyses.map((analysis) => analysis.summary).join(" "),
+          summary: perArtifactChunkAnalyses.map((analysis) => analysis.summary).join(" "),
         });
       }
 
-      return await this.summarizeFindings({
-        pageUrl: validatedInput.pageUrl,
-        bundleSummaries,
-        chunkAnalyses,
-      });
+      return await this.summarizeFindings(validatedInput.pageUrl, artifactSummaries, chunkAnalyses);
     } catch (error) {
       throw normalizeAiError(error);
     }
@@ -223,26 +233,27 @@ export class AiBundleAnalyzer {
 
   private async analyzeChunk(input: {
     pageUrl: string;
-    bundle: FormattedBundle;
+    artifact: FormattedArtifact;
     chunk: string;
     chunkIndex: number;
     totalChunks: number;
-  }): Promise<ChunkAnalysis> {
+  }) {
     const result = await generateText({
-      model: this.openai(this.options.model),
+      model: this.providerClient.getModel(),
       system: [
-        "You are reverse-engineering a frontend JavaScript bundle.",
-        "Return only structured output matching the provided schema.",
-        "Infer entry points, initialization flow, call relationships, and restored names from context.",
-        "Do not speculate wildly; be explicit when evidence is weak.",
+        "You are reverse-engineering website artifacts including JavaScript, HTML, CSS, service workers, and WASM summaries.",
+        "Return only structured output matching the schema.",
+        "Focus on concrete execution flow, runtime entry points, inter-artifact relationships, restored names, and operator tips.",
       ].join(" "),
       prompt: [
         `Target page: ${input.pageUrl}`,
-        `Bundle URL: ${input.bundle.url}`,
+        `Artifact URL: ${input.artifact.url}`,
+        `Artifact type: ${input.artifact.type}`,
+        `Discovered from: ${input.artifact.discoveredFrom}`,
         `Chunk ${input.chunkIndex + 1} of ${input.totalChunks}`,
-        input.bundle.formattingNote ? `Formatting note: ${input.bundle.formattingNote}` : "Formatting note: none",
-        "Analyze the JavaScript below.",
-        "```javascript",
+        input.artifact.formattingNote ? `Formatting note: ${input.artifact.formattingNote}` : "Formatting note: none",
+        "Analyze the artifact content below.",
+        "```text",
         input.chunk,
         "```",
       ].join("\n\n"),
@@ -258,29 +269,29 @@ export class AiBundleAnalyzer {
     return chunkAnalysisSchema.parse(result.output);
   }
 
-  private async summarizeFindings(input: {
-    pageUrl: string;
-    bundleSummaries: Array<{ url: string; chunkCount: number; summary: string }>;
-    chunkAnalyses: ChunkAnalysis[];
-  }): Promise<BundleAnalysis> {
+  private async summarizeFindings(
+    pageUrl: string,
+    artifactSummaries: Array<z.infer<typeof artifactSummarySchema>>,
+    chunkAnalyses: Array<z.infer<typeof chunkAnalysisSchema>>,
+  ): Promise<BundleAnalysis> {
     try {
-      const synthesisResult = await generateText({
-        model: this.openai(this.options.model),
+      const result = await generateText({
+        model: this.providerClient.getModel(),
         system: [
-          "You are consolidating multiple partial reverse-engineering analyses of JavaScript bundles.",
-          "Merge duplicates, preserve evidence-backed conclusions, and prefer precise technical language.",
+          "You are consolidating reverse-engineering analyses from multiple website artifacts.",
+          "Merge duplicates, produce a coherent site map, and include actionable investigation tips.",
           "Return only structured output matching the schema.",
         ].join(" "),
         prompt: [
-          `Target page: ${input.pageUrl}`,
-          "Bundle summaries:",
-          JSON.stringify(input.bundleSummaries, null, 2),
+          `Target page: ${pageUrl}`,
+          "Artifact summaries:",
+          JSON.stringify(artifactSummaries, null, 2),
           "Chunk analyses:",
-          JSON.stringify(input.chunkAnalyses, null, 2),
+          JSON.stringify(chunkAnalyses, null, 2),
         ].join("\n\n"),
         output: Output.object({
           schema: finalAnalysisSchema.omit({
-            bundleSummaries: true,
+            artifactSummaries: true,
             analyzedChunkCount: true,
           }),
         }),
@@ -293,46 +304,43 @@ export class AiBundleAnalyzer {
       });
 
       return finalAnalysisSchema.parse({
-        ...synthesisResult.output,
-        bundleSummaries: input.bundleSummaries,
-        analyzedChunkCount: input.chunkAnalyses.length,
+        ...result.output,
+        artifactSummaries,
+        analyzedChunkCount: chunkAnalyses.length,
       });
     } catch {
-      const mergedEntryPoints = deduplicateObjects(
-        input.chunkAnalyses.flatMap((analysis) => analysis.entryPoints),
-        (entryPoint) => `${entryPoint.symbol}:${entryPoint.description}`,
-      );
-      const mergedFlow = deduplicateObjects(
-        input.chunkAnalyses.flatMap((analysis) => analysis.initializationFlow),
-        (step) => step,
-      );
-      const mergedGraph = deduplicateObjects(
-        input.chunkAnalyses.flatMap((analysis) => analysis.callGraph),
-        (edge) => `${edge.caller}->${edge.callee}`,
-      );
-      const mergedNames = deduplicateObjects(
-        input.chunkAnalyses.flatMap((analysis) => analysis.restoredNames),
-        (name) => `${name.originalName}:${name.suggestedName}`,
-      );
-      const libraries = deduplicateObjects(
-        input.chunkAnalyses.flatMap((analysis) => analysis.notableLibraries),
-        (library) => library,
-      );
-      const risks = deduplicateObjects(
-        input.chunkAnalyses.flatMap((analysis) => analysis.risks),
-        (risk) => risk,
-      );
-
       return finalAnalysisSchema.parse({
-        overview: input.bundleSummaries.map((summary) => summary.summary).join(" ").trim() || "Bundle analysis completed.",
-        entryPoints: mergedEntryPoints,
-        initializationFlow: mergedFlow,
-        callGraph: mergedGraph,
-        restoredNames: mergedNames,
-        notableLibraries: libraries,
-        risks,
-        bundleSummaries: input.bundleSummaries,
-        analyzedChunkCount: input.chunkAnalyses.length,
+        overview: artifactSummaries.map((summary) => summary.summary).join(" ").trim() || "Artifact analysis completed.",
+        entryPoints: deduplicate(
+          chunkAnalyses.flatMap((analysis) => analysis.entryPoints),
+          (entryPoint) => `${entryPoint.symbol}:${entryPoint.description}`,
+        ),
+        initializationFlow: deduplicate(
+          chunkAnalyses.flatMap((analysis) => analysis.initializationFlow),
+          (step) => step,
+        ),
+        callGraph: deduplicate(
+          chunkAnalyses.flatMap((analysis) => analysis.callGraph),
+          (edge) => `${edge.caller}->${edge.callee}`,
+        ),
+        restoredNames: deduplicate(
+          chunkAnalyses.flatMap((analysis) => analysis.restoredNames),
+          (entry) => `${entry.originalName}:${entry.suggestedName}`,
+        ),
+        notableLibraries: deduplicate(
+          chunkAnalyses.flatMap((analysis) => analysis.notableLibraries),
+          (library) => library,
+        ),
+        investigationTips: deduplicate(
+          chunkAnalyses.flatMap((analysis) => analysis.investigationTips),
+          (tip) => tip,
+        ),
+        risks: deduplicate(
+          chunkAnalyses.flatMap((analysis) => analysis.risks),
+          (risk) => risk,
+        ),
+        artifactSummaries,
+        analyzedChunkCount: chunkAnalyses.length,
       });
     }
   }

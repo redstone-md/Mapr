@@ -1,8 +1,7 @@
-import { Buffer } from "buffer";
 import * as prettier from "prettier";
 import { z } from "zod";
 
-import type { ScriptBundle } from "./scraper";
+import { artifactTypeSchema, type DiscoveredArtifact } from "./artifacts";
 
 export const DEFAULT_MAX_FORMAT_BYTES = 2 * 1024 * 1024;
 
@@ -10,18 +9,38 @@ const formatterOptionsSchema = z.object({
   maxFormatBytes: z.number().int().positive().default(DEFAULT_MAX_FORMAT_BYTES),
 });
 
-const formattedBundleSchema = z.object({
+const formattedArtifactSchema = z.object({
   url: z.string().url(),
-  rawCode: z.string(),
-  formattedCode: z.string(),
+  type: artifactTypeSchema,
+  content: z.string(),
+  formattedContent: z.string(),
   sizeBytes: z.number().int().nonnegative(),
+  discoveredFrom: z.string().min(1),
   formattingSkipped: z.boolean(),
   formattingNote: z.string().optional(),
 });
 
-export type FormattedBundle = z.infer<typeof formattedBundleSchema>;
+export type FormattedArtifact = z.infer<typeof formattedArtifactSchema>;
 
 type FormatterOptions = z.input<typeof formatterOptionsSchema>;
+
+function resolvePrettierParser(artifactType: FormattedArtifact["type"]): "babel" | "babel-ts" | "html" | "css" | "json" | null {
+  switch (artifactType) {
+    case "html":
+      return "html";
+    case "stylesheet":
+      return "css";
+    case "manifest":
+    case "json":
+      return "json";
+    case "script":
+    case "service-worker":
+    case "worker":
+      return "babel";
+    case "wasm":
+      return null;
+  }
+}
 
 export class BundleFormatter {
   private readonly options: z.infer<typeof formatterOptionsSchema>;
@@ -30,66 +49,84 @@ export class BundleFormatter {
     this.options = formatterOptionsSchema.parse(options);
   }
 
-  public async formatBundles(bundles: ScriptBundle[]): Promise<FormattedBundle[]> {
-    return Promise.all(bundles.map((bundle) => this.formatBundle(bundle)));
+  public async formatArtifacts(artifacts: DiscoveredArtifact[]): Promise<FormattedArtifact[]> {
+    return Promise.all(artifacts.map((artifact) => this.formatArtifact(artifact)));
   }
 
-  public async formatBundle(bundle: ScriptBundle): Promise<FormattedBundle> {
-    const validatedBundle = z
+  public async formatArtifact(artifact: DiscoveredArtifact): Promise<FormattedArtifact> {
+    const validatedArtifact = z
       .object({
         url: z.string().url(),
-        rawCode: z.string(),
+        type: artifactTypeSchema,
+        content: z.string(),
         sizeBytes: z.number().int().nonnegative(),
+        discoveredFrom: z.string().min(1),
       })
-      .parse(bundle);
+      .parse(artifact);
 
-    if (validatedBundle.sizeBytes > this.options.maxFormatBytes) {
-      return formattedBundleSchema.parse({
-        ...validatedBundle,
-        formattedCode: validatedBundle.rawCode,
+    if (validatedArtifact.sizeBytes > this.options.maxFormatBytes) {
+      return formattedArtifactSchema.parse({
+        ...validatedArtifact,
+        formattedContent: validatedArtifact.content,
         formattingSkipped: true,
-        formattingNote: `Skipped formatting because the bundle exceeded ${this.options.maxFormatBytes} bytes.`,
+        formattingNote: `Skipped formatting because the artifact exceeded ${this.options.maxFormatBytes} bytes.`,
+      });
+    }
+
+    const parser = resolvePrettierParser(validatedArtifact.type);
+    if (!parser) {
+      return formattedArtifactSchema.parse({
+        ...validatedArtifact,
+        formattedContent: validatedArtifact.content,
+        formattingSkipped: false,
+        formattingNote: "Binary artifact summarized without additional formatting.",
       });
     }
 
     try {
-      const formattedCode = await prettier.format(validatedBundle.rawCode, {
-        parser: "babel",
+      const formattedContent = await prettier.format(validatedArtifact.content, {
+        parser,
         printWidth: 100,
         tabWidth: 2,
       });
 
-      return formattedBundleSchema.parse({
-        ...validatedBundle,
-        formattedCode,
+      return formattedArtifactSchema.parse({
+        ...validatedArtifact,
+        formattedContent,
         formattingSkipped: false,
       });
     } catch (primaryError) {
-      try {
-        const formattedCode = await prettier.format(validatedBundle.rawCode, {
-          parser: "babel-ts",
-          printWidth: 100,
-          tabWidth: 2,
-        });
+      if (parser === "babel") {
+        try {
+          const formattedContent = await prettier.format(validatedArtifact.content, {
+            parser: "babel-ts",
+            printWidth: 100,
+            tabWidth: 2,
+          });
 
-        return formattedBundleSchema.parse({
-          ...validatedBundle,
-          formattedCode,
-          formattingSkipped: false,
-        });
-      } catch {
-        const primaryMessage = primaryError instanceof Error ? primaryError.message : "formatter error";
-        return formattedBundleSchema.parse({
-          ...validatedBundle,
-          formattedCode: validatedBundle.rawCode,
-          formattingSkipped: true,
-          formattingNote: `Formatting failed and raw code was preserved: ${primaryMessage}`,
-        });
+          return formattedArtifactSchema.parse({
+            ...validatedArtifact,
+            formattedContent,
+            formattingSkipped: false,
+          });
+        } catch {
+          const message = primaryError instanceof Error ? primaryError.message : "formatter error";
+          return formattedArtifactSchema.parse({
+            ...validatedArtifact,
+            formattedContent: validatedArtifact.content,
+            formattingSkipped: true,
+            formattingNote: `Formatting failed and raw content was preserved: ${message}`,
+          });
+        }
       }
-    }
-  }
 
-  public getSizeInBytes(source: string): number {
-    return Buffer.byteLength(z.string().parse(source), "utf8");
+      const message = primaryError instanceof Error ? primaryError.message : "formatter error";
+      return formattedArtifactSchema.parse({
+        ...validatedArtifact,
+        formattedContent: validatedArtifact.content,
+        formattingSkipped: true,
+        formattingNote: `Formatting failed and raw content was preserved: ${message}`,
+      });
+    }
   }
 }
