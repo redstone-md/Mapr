@@ -1,6 +1,6 @@
 {
   "name": "@redstone-md/mapr",
-  "version": "0.0.1-alpha",
+  "version": "0.0.2-alpha",
   "type": "module",
   "description": "Bun-native CLI/TUI for reverse-engineering frontend websites, bundles, WASM, and service workers",
   "license": "SEE LICENSE IN LICENSE",
