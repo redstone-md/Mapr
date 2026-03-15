@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { ConfigManager, DEFAULT_MODEL } from "../lib/config";
+import { ConfigManager, DEFAULT_MODEL, DEFAULT_MODEL_CONTEXT_SIZE } from "../lib/config";
 
 const createdDirectories: string[] = [];
 
@@ -29,6 +29,7 @@ describe("ConfigManager", () => {
         apiKey: "local-secret",
         baseURL: "http://localhost:8000/v1",
         model: "qwen2.5-coder",
+        modelContextSize: 512000,
       }),
     });
 
@@ -39,14 +40,17 @@ describe("ConfigManager", () => {
       apiKey: string;
       baseURL: string;
       model: string;
+      modelContextSize: number;
     };
 
     expect(config.providerType).toBe("openai-compatible");
     expect(config.providerName).toBe("Local vLLM");
     expect(config.baseURL).toBe("http://localhost:8000/v1");
     expect(config.model).toBe("qwen2.5-coder");
+    expect(config.modelContextSize).toBe(512000);
     expect(savedConfig.providerType).toBe("openai-compatible");
     expect(savedConfig.model).toBe("qwen2.5-coder");
+    expect(savedConfig.modelContextSize).toBe(512000);
   });
 
   test("reads and normalizes a legacy config without prompting", async () => {
@@ -60,12 +64,14 @@ describe("ConfigManager", () => {
       apiKey: "sk-existing-key",
       baseURL: "https://api.openai.com/v1",
       model: DEFAULT_MODEL,
+      modelContextSize: DEFAULT_MODEL_CONTEXT_SIZE,
     });
 
     const reloadedConfig = await manager.ensureConfig();
     expect(reloadedConfig.providerType).toBe("openai");
     expect(reloadedConfig.providerName).toBe("OpenAI");
     expect(reloadedConfig.model).toBe(DEFAULT_MODEL);
+    expect(reloadedConfig.modelContextSize).toBe(DEFAULT_MODEL_CONTEXT_SIZE);
   });
 
   test("migrates the old openAiApiKey field", async () => {
@@ -80,6 +86,7 @@ describe("ConfigManager", () => {
         {
           openAiApiKey: "sk-legacy-key",
           model: DEFAULT_MODEL,
+          modelContextSize: DEFAULT_MODEL_CONTEXT_SIZE,
         },
         null,
         2,
@@ -93,5 +100,32 @@ describe("ConfigManager", () => {
     expect(config.providerName).toBe("OpenAI");
     expect(config.apiKey).toBe("sk-legacy-key");
     expect(config.baseURL).toBe("https://api.openai.com/v1");
+    expect(config.modelContextSize).toBe(DEFAULT_MODEL_CONTEXT_SIZE);
+  });
+
+  test("resolves config headlessly from saved values and overrides", async () => {
+    const tempHome = await mkdtemp(join(tmpdir(), "mapr-config-"));
+    createdDirectories.push(tempHome);
+
+    const manager = new ConfigManager({ homeDir: tempHome });
+    await manager.saveConfig({
+      providerType: "openai-compatible",
+      providerName: "Local vLLM",
+      apiKey: "secret",
+      baseURL: "http://localhost:8000/v1",
+      model: "qwen2.5-coder",
+      modelContextSize: 128000,
+    });
+
+    const config = await manager.ensureConfig({
+      headless: true,
+      overrides: {
+        model: "qwen2.5-coder-32b",
+        modelContextSize: 512000,
+      },
+    });
+
+    expect(config.model).toBe("qwen2.5-coder-32b");
+    expect(config.modelContextSize).toBe(512000);
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "buffer";
 
-import { chunkTextByBytes } from "../lib/ai-analyzer";
+import { chunkTextByBytes, deriveChunkSizeBytes } from "../lib/ai-analyzer";
 
 describe("chunkTextByBytes", () => {
   test("returns a single chunk when input fits within the byte limit", () => {
@@ -27,5 +27,10 @@ describe("chunkTextByBytes", () => {
     for (const chunk of chunks) {
       expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(50);
     }
+  });
+
+  test("derives larger chunk sizes for larger model context windows", () => {
+    expect(deriveChunkSizeBytes(128000)).toBeGreaterThanOrEqual(115200);
+    expect(deriveChunkSizeBytes(512000)).toBeGreaterThan(deriveChunkSizeBytes(128000));
   });
 });

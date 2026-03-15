@@ -3,12 +3,6 @@ import { z } from "zod";
 
 import { artifactTypeSchema, type DiscoveredArtifact } from "./artifacts";
 
-export const DEFAULT_MAX_FORMAT_BYTES = 2 * 1024 * 1024;
-
-const formatterOptionsSchema = z.object({
-  maxFormatBytes: z.number().int().positive().default(DEFAULT_MAX_FORMAT_BYTES),
-});
-
 const formattedArtifactSchema = z.object({
   url: z.string().url(),
   type: artifactTypeSchema,
@@ -21,8 +15,6 @@ const formattedArtifactSchema = z.object({
 });
 
 export type FormattedArtifact = z.infer<typeof formattedArtifactSchema>;
-
-type FormatterOptions = z.input<typeof formatterOptionsSchema>;
 
 function resolvePrettierParser(artifactType: FormattedArtifact["type"]): "babel" | "babel-ts" | "html" | "css" | "json" | null {
   switch (artifactType) {
@@ -43,12 +35,6 @@ function resolvePrettierParser(artifactType: FormattedArtifact["type"]): "babel"
 }
 
 export class BundleFormatter {
-  private readonly options: z.infer<typeof formatterOptionsSchema>;
-
-  public constructor(options: FormatterOptions = {}) {
-    this.options = formatterOptionsSchema.parse(options);
-  }
-
   public async formatArtifacts(artifacts: DiscoveredArtifact[]): Promise<FormattedArtifact[]> {
     return Promise.all(artifacts.map((artifact) => this.formatArtifact(artifact)));
   }
@@ -63,15 +49,6 @@ export class BundleFormatter {
         discoveredFrom: z.string().min(1),
       })
       .parse(artifact);
-
-    if (validatedArtifact.sizeBytes > this.options.maxFormatBytes) {
-      return formattedArtifactSchema.parse({
-        ...validatedArtifact,
-        formattedContent: validatedArtifact.content,
-        formattingSkipped: true,
-        formattingNote: `Skipped formatting because the artifact exceeded ${this.options.maxFormatBytes} bytes.`,
-      });
-    }
 
     const parser = resolvePrettierParser(validatedArtifact.type);
     if (!parser) {
