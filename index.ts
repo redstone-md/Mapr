@@ -101,7 +101,7 @@ async function resolveLocalRag(headless: boolean, prefilledValue: boolean | unde
     return prefilledValue;
   }
 
-  if (headless) {
+  if (headless || totalBytes < 1_000_000) {
     return false;
   }
 
