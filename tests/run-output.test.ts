@@ -35,22 +35,48 @@ describe("RunArtifactsWriter", () => {
       ],
       analysis: {
         overview: "ok",
-        entryPoints: [],
+        entryPoints: [{ symbol: "bootstrapApp", description: "main entry", evidence: "artifact summary" }],
         initializationFlow: [],
-        callGraph: [],
+        callGraph: [{ caller: "bootstrapApp", callee: "renderLogin", rationale: "startup chain" }],
         restoredNames: [],
         notableLibraries: [],
         investigationTips: [],
         risks: [],
-        artifactSummaries: [],
+        artifactSummaries: [
+          {
+            url: "https://example.com/assets/app.js",
+            type: "script",
+            chunkCount: 1,
+            summary: "bootstrapApp initializes renderLogin for the auth route.",
+          },
+        ],
         analyzedChunkCount: 1,
       },
       deterministicSurface: {
-        apiEndpoints: [],
+        apiEndpoints: [
+          {
+            url: "https://example.com/api/login",
+            methods: ["POST"],
+            sourceArtifactUrl: "https://example.com/assets/app.js",
+            purpose: "Likely auth/session endpoint",
+            requestFields: ["email", "password"],
+            responseFields: [],
+            evidence: ["fetch('/api/login')"],
+          },
+        ],
         openApiDocuments: [],
         graphQlEndpoints: [],
         graphQlOperations: [],
-        authFlows: [],
+        authFlows: [
+          {
+            title: "Primary authentication flow",
+            triggers: ["login"],
+            steps: [],
+            tokens: ["cookie"],
+            errors: ["invalid password"],
+            evidence: ["artifact"],
+          },
+        ],
         captchaFlows: [],
         fingerprintingSignals: [],
         encryptionSignals: [],
@@ -70,5 +96,8 @@ describe("RunArtifactsWriter", () => {
     expect(manifest).toContain("\"rawPath\"");
     expect(readme).toContain("Disclaimer");
     expect(htmlReport).toContain("Interactive Code Map");
+    expect(htmlReport).toContain("graph-svg");
+    expect(htmlReport).toContain("preview-tab");
+    expect(htmlReport).toContain("data-jump-artifact-by-url");
   });
 });
