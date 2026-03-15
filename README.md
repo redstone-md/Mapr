@@ -42,13 +42,13 @@ bun run index.ts
 If the package is published and Bun is installed locally:
 
 ```bash
-npx mapr --help
+npx @redstone-md/mapr --help
 ```
 
 ## Headless Examples
 
 ```bash
-npx mapr \
+npx @redstone-md/mapr \
   --headless \
   --url http://localhost:5178 \
   --provider-type openai-compatible \
@@ -61,7 +61,7 @@ npx mapr \
 ```
 
 ```bash
-npx mapr --list-models --headless --provider-type openai-compatible --api-key secret --base-url http://localhost:8000/v1
+npx @redstone-md/mapr --list-models --headless --provider-type openai-compatible --api-key secret --base-url http://localhost:8000/v1
 ```
 
 ## Swarm Design
