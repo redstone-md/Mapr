@@ -43,7 +43,7 @@ describe("extractArtifactCandidates", () => {
 });
 
 describe("BundleScraper", () => {
-  test("crawls same-origin pages, expands with sitemap, fetches source maps, and skips image artifacts", async () => {
+  test("crawls same-origin pages, follows iframe pages, expands with sitemap, and skips binary/font artifacts", async () => {
     const fetchLog: string[] = [];
     const fetcher = async (input: string | URL | Request): Promise<Response> => {
       const url = String(input);
@@ -70,6 +70,8 @@ describe("BundleScraper", () => {
               </head>
               <body>
                 <a href="/dashboard">Dashboard</a>
+                <a href="/font-route">FontRoute</a>
+                <iframe src="/embedded/login"></iframe>
                 <img src="/assets/logo.png" />
               </body>
             </html>
@@ -83,6 +85,13 @@ describe("BundleScraper", () => {
           status: 200,
           headers: { "content-type": "text/html" },
         });
+      }
+
+      if (url === "https://example.com/embedded/login") {
+        return new Response(
+          `<html><head><script src="/assets/frame.js"></script></head><body>iframe</body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } },
+        );
       }
 
       if (url === "https://example.com/offers") {
@@ -118,6 +127,13 @@ describe("BundleScraper", () => {
         });
       }
 
+      if (url === "https://example.com/assets/frame.js") {
+        return new Response("console.log('iframe-js');", {
+          status: 200,
+          headers: { "content-type": "application/javascript" },
+        });
+      }
+
       if (url === "https://example.com/assets/app.js.map") {
         return new Response(
           JSON.stringify({
@@ -147,6 +163,10 @@ describe("BundleScraper", () => {
         return new Response("png", { status: 200, headers: { "content-type": "image/png" } });
       }
 
+      if (url === "https://example.com/font-route") {
+        return new Response("font", { status: 200, headers: { "content-type": "font/woff2" } });
+      }
+
       return new Response("missing", { status: 404, statusText: "Not Found" });
     };
 
@@ -159,17 +179,26 @@ describe("BundleScraper", () => {
     expect(fetchLog).toContain("https://example.com/robots.txt");
     expect(fetchLog).toContain("https://example.com/sitemap.xml");
     expect(fetchLog).toContain("https://example.com/offers");
+    expect(fetchLog).toContain("https://example.com/embedded/login");
+    expect(fetchLog).toContain("https://example.com/assets/frame.js");
+    expect(fetchLog).toContain("https://example.com/font-route");
     expect(fetchLog).not.toContain("https://example.com/assets/logo.png");
     expect(result.htmlPages.sort()).toEqual(
-      ["https://example.com/offers", "https://example.com/", "https://example.com/dashboard"].sort(),
+      [
+        "https://example.com/offers",
+        "https://example.com/",
+        "https://example.com/dashboard",
+        "https://example.com/embedded/login",
+      ].sort(),
     );
     expect(result.artifacts.map((artifact) => artifact.type).sort()).toEqual(
-      (["script", "script", "script", "service-worker", "source-map", "wasm"] as const).slice().sort(),
+      (["script", "script", "script", "script", "service-worker", "source-map", "wasm"] as const).slice().sort(),
     );
     expect(result.scriptUrls.sort()).toEqual(
       [
         "https://example.com/assets/offers.js",
         "https://example.com/assets/app.js",
+        "https://example.com/assets/frame.js",
         "https://example.com/sw.js",
         "https://example.com/assets/chunk.js",
       ].sort(),

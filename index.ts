@@ -4,8 +4,9 @@ import { cancel, confirm, intro, isCancel, log, outro, spinner, text } from "@cl
 import pc from "picocolors";
 import packageJson from "./package.json";
 
-import { AiBundleAnalyzer, PartialAnalysisError, buildAnalysisSnapshot, chunkTextByBytes, deriveChunkSizeBytes } from "./lib/ai-analyzer";
-import { parseCliArgs, getConfigOverrides, renderHelpText } from "./lib/cli-args";
+import { buildAnalysisSnapshot, PartialAnalysisError } from "./lib/analysis-schema";
+import { AiBundleAnalyzer, chunkTextByBytes, deriveChunkSizeBytes } from "./lib/ai-analyzer";
+import { getConfigOverrides, parseCliArgs, renderHelpText } from "./lib/cli-args";
 import { ConfigManager } from "./lib/config";
 import { BundleFormatter } from "./lib/formatter";
 import { renderProgressBar } from "./lib/progress";
@@ -98,8 +99,12 @@ async function run(): Promise<void> {
   }
 
   if (args.listModels) {
-    const models = await configManager.listModels(await configManager.resolveConfigDraft(configOverrides));
-    console.log(models.join("\n"));
+    const models = await configManager.listModelCatalog(await configManager.resolveConfigDraft(configOverrides));
+    console.log(
+      models
+        .map((model) => (model.contextSize ? `${model.id}\t${model.contextSize}` : model.id))
+        .join("\n"),
+    );
     return;
   }
 
@@ -116,6 +121,10 @@ async function run(): Promise<void> {
   const scraper = new BundleScraper(fetch, {
     maxPages: args.maxPages,
     maxArtifacts: args.maxArtifacts,
+    maxDepth: args.maxDepth,
+    onProgress(event) {
+      scrapeStep.message(event.message);
+    },
   });
   const scrapeResult = await scraper.scrape(targetUrl);
   scrapeStep.stop(

@@ -2,8 +2,8 @@ import { writeFile } from "fs/promises";
 import { resolve } from "path";
 import { z } from "zod";
 
+import type { BundleAnalysis } from "./analysis-schema";
 import { artifactTypeSchema } from "./artifacts";
-import type { BundleAnalysis } from "./ai-analyzer";
 import type { FormattedArtifact } from "./formatter";
 
 const reportInputSchema = z.object({
