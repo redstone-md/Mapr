@@ -1,5 +1,7 @@
 # Mapr
 
+![Mapr banner](./assets/banner.svg)
+
 Mapr is a Bun-native CLI/TUI for reverse-engineering frontend websites and build outputs. It crawls a target site, collects analyzable frontend artifacts, runs a multi-agent AI analysis pipeline over chunked code, and writes a Markdown report with entry points, initialization flow, inferred call graph edges, restored names, artifact summaries, and investigation tips.
 
 This repository is public for source visibility and collaboration. The license remains source-available and restricted. Read the contribution and license sections before reusing or contributing to the codebase.
